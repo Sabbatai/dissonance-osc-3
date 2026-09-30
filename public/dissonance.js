@@ -42,7 +42,8 @@
                              Start button instead of new AudioContext()
      audioOut({ anchor })    returns a node: connect your final sound to
                              it instead of ctx.destination. Its strip has
-                             "send audio" (to the room) and "my speakers"
+                             "send audio" (to the room) and "my speakers",
+                             plus a Stop sound / Resume sound button
      audioIn(id, { anchor }) returns a node carrying another player's
                              sound; its strip picks whose. Connect it
                              into your effect. A limiter guards loops.
@@ -322,7 +323,35 @@
       toggle("my speakers", st.speaker, (v) => { st.speaker = v; saveA("out-speaker", v); speaker.gain.setTargetAtTime(v ? 1 : 0, ctx.currentTime, 0.02); }));
     placeStrip(o.anchor || "start", "audio out", strip);
     outBus = bus;
+    strip.before(stopButton());
     return bus;
+  }
+
+  // Stop / resume everything this page is doing with sound. Pauses the
+  // whole audio engine, so patterns, delays and streams freeze in place
+  // and carry on from there when resumed. The page's own Start button
+  // also resumes.
+  function stopButton(o = {}) {
+    const ctx = audioContext();
+    injectStyle();
+    const b = document.createElement("button");
+    b.className = "d-stop";
+    const paint = () => {
+      const on = ctx.state === "running";
+      b.textContent = on ? "Stop sound" : "Resume sound";
+      b.classList.toggle("stopped", !on);
+      if (on && outBus) outBus.gain.setTargetAtTime(1, ctx.currentTime, 0.01);
+    };
+    b.onclick = () => {
+      if (ctx.state === "running") {
+        if (outBus) outBus.gain.setTargetAtTime(0, ctx.currentTime, 0.01);   // fade, no click
+        setTimeout(() => ctx.suspend(), 60);
+      } else ctx.resume();
+    };
+    ctx.addEventListener("statechange", paint);
+    paint();
+    if (o.anchor) { const a = typeof o.anchor === "string" ? $id(o.anchor) : o.anchor; if (a) a.after(b); }
+    return b;
   }
 
   // a node carrying another player's sound (choose whose in its strip)
@@ -449,6 +478,8 @@
       .rt-inv input { margin: 0; }
       .rt-dot { width: 8px; height: 8px; border-radius: 50%; background: #333; flex: none; }
       .rt-dot.hit { background: #6c6; }
+      button.d-stop { margin-left: 0; }
+      button.d-stop.stopped { background: #733; border-color: #a55; }
       #routing .rt-row { display: flex; align-items: center; gap: 6px; margin: 8px 0; font-size: 13px; }
       #routing .rt-name { color: #aaa; }
     `;
@@ -456,5 +487,5 @@
   }
 
   onNameChange(() => params.forEach(fillListen));
-  Object.assign(window, { param, send, on, logLine, setStatus, audioContext, audioOut, audioIn, onStreams });
+  Object.assign(window, { param, send, on, logLine, setStatus, audioContext, audioOut, audioIn, onStreams, stopButton });
 })();

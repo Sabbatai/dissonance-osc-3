@@ -52,7 +52,7 @@
 <div id="status" class="status">not connected</div>
 
 <button id="start">Start sound</button>
-<button id="stop">Stop</button>
+<button id="stop">Stop pattern</button>
 <span id="align">alignment</span>
 <label>My name <input id="name" value="sequencer"></label>
 
@@ -337,7 +337,7 @@ $("start").onclick = () => {
     ctx = audioContext();
     master = ctx.createDynamicsCompressor();
     const out = ctx.createGain(); out.gain.value = 0.6;
-    master.connect(out).connect(audioOut({ anchor: "align" }));
+    master.connect(out).connect(audioOut({ anchor: "stop" }));
     noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 0.2, ctx.sampleRate);
     const d = noiseBuf.getChannelData(0);
     for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;

@@ -58,6 +58,7 @@ $("start").onclick = () => {
   masterAn = ctx.createAnalyser(); masterAn.fftSize = 1024;
   masterIn.connect(masterGain).connect(limiter).connect(masterAn).connect(ctx.destination);
   $("start").textContent = "Mixer running";
+  stopButton({ anchor: "start" });
   $("empty").textContent = "Waiting for instruments to send audio...";
   $("desk").append(makeStrip("master", { master: true }));
   onStreams(update);
