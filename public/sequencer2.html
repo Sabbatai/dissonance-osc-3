@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Odd Sequencer</title>
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px; background: #111; color: #eee; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .status { font-size: 13px; color: #999; margin-bottom: 16px; }
+  .status.on { color: #6c6; }
+  label { display: block; margin: 12px 0 2px; }
+  input[type=range] { width: 100%; }
+  button { font: inherit; padding: 8px 14px; margin: 8px 8px 0 0; background: #333; color: #eee; border: 1px solid #555; border-radius: 4px; cursor: pointer; }
+  #log { margin-top: 20px; font: 12px/1.3 ui-monospace, monospace; color: #8a8; height: 120px; overflow: auto; background: #000; padding: 8px; border-radius: 4px; white-space: pre; }
+
+  .lane { display: flex; align-items: center; gap: 8px; margin: 10px 0; }
+  .lane .name { width: 48px; font-size: 13px; color: #aaa; }
+  .lane input[type=number] { width: 44px; font: inherit; background: #222; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 2px 4px; }
+  .steps { display: flex; flex-wrap: wrap; gap: 3px; flex: 1; }
+  .step { width: 22px; height: 22px; border-radius: 3px; background: #2a2a2a; border: 1px solid #3a3a3a; cursor: pointer; }
+  .step.on { background: var(--c); border-color: var(--c); }
+  .step.head { outline: 2px solid #fff; outline-offset: 1px; }
+  .row { display: flex; gap: 16px; }
+  .row > label { flex: 1; }
+  #align { display: inline-block; margin-left: 8px; font-size: 13px; color: #555; }
+  #align.flash { color: #fc6; }
+
+  /* pluck pitch panel */
+  .panel { margin: 18px 0; padding: 12px; border: 1px solid #333; border-radius: 6px; }
+  .panel-head { font-weight: 600; margin-bottom: 8px; }
+  .panel-head .hint { font-weight: 400; font-size: 13px; color: #888; margin-left: 6px; }
+  .limits { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+  .limits label { display: inline-flex; align-items: center; gap: 4px; margin: 0; }
+  .limits .root { flex: 1 1 100%; flex-wrap: wrap; }
+  .limits .root input { flex: 1; }
+  .l3 { color: #9bc; } .l5 { color: #ec6; } .l7 { color: #c8f; } .l1 { color: #fff; }
+  #gamut { display: flex; flex-wrap: wrap; gap: 3px; margin: 10px 0; }
+  .chip { font: 11px ui-monospace, monospace; padding: 3px 5px; border-radius: 3px; background: #222; border: 1px solid #333; cursor: pointer; }
+  .chip.off { opacity: 0.25; }
+  #pitches { display: flex; flex-wrap: wrap; gap: 4px; }
+  .pcell { width: 52px; display: flex; flex-direction: column; align-items: center; padding: 4px 0; border-radius: 4px; background: #1a1a1a; }
+  .pcell.head { outline: 2px solid #ec6; }
+  .pcell.rest { opacity: 0.4; }
+  .pcell .ratio { font: 11px ui-monospace, monospace; height: 14px; }
+  .pcell input { writing-mode: vertical-lr; direction: rtl; width: 20px; height: 90px; margin: 4px 0; }
+  .pcell .n { font-size: 10px; color: #666; }
+</style>
+</head>
+<body>
+<h1>Odd Sequencer</h1>
+<div id="status" class="status">not connected</div>
+
+<button id="start">Start sound</button>
+<button id="stop">Stop</button>
+<span id="align">alignment</span>
+<label>My name <input id="name" value="sequencer"></label>
+
+<div id="lanes"></div>
+
+<div class="panel">
+  <div class="panel-head">Pluck pitch <span class="hint">24-tone just intonation, two octaves</span></div>
+  <div class="limits">
+    <label class="l3"><input type="checkbox" id="lim3" checked> 3-limit</label>
+    <label class="l5"><input type="checkbox" id="lim5" checked> 5-limit</label>
+    <label class="l7"><input type="checkbox" id="lim7" checked> 7-limit</label>
+    <label class="root">root <input id="root" type="range" min="55" max="330" step="0.1" value="110"> <span id="rootHz">110 Hz</span></label>
+  </div>
+  <div id="gamut"></div>
+  <div id="pitches"></div>
+  <button id="rand">randomize pitches</button>
+  <button id="flat">all to 1/1</button>
+</div>
+
+<div class="row">
+  <label>tempo <input id="tempo" type="range" min="60" max="200" step="1" value="128"></label>
+  <label>swing <input id="swing" type="range" min="0" max="0.6" step="0.01" value="0.1"></label>
+</div>
+<label>density <input id="density" type="range" min="0" max="1" step="0.001" value="0.4"></label>
+<label>brightness <input id="brightness" type="range" min="0" max="1" step="0.001" value="0.5"></label>
+<button id="pulse">pulse (realign everyone)</button>
+
+<div id="routing"></div>
+<div id="log"></div>
+
+<script src="osc-browser.min.js"></script>
+<script src="dissonance.js"></script>
+<script>
+/* =====================================================================
+   INSTRUMENT: polymetric sequencer
+   (network and routing strips come from dissonance.js)
+
+   Four lanes of different lengths (5, 7, 11, 13 steps) run at the same
+   step rate, so they drift against each other and only line up again
+   rarely. Patterns are Euclidean: hits spread as evenly as possible.
+
+   /shared/density     how many hits each lane has (patterns regenerate)
+   /shared/brightness  filter cutoff, decay length, register
+   /shared/pulse       all playheads jump back to step 1 together
+
+   Sends /shared/pulse when the first two lanes line up by themselves,
+   and /player/<name>/note on every note of the pluck lane (0..1 across
+   its two-octave range).
+
+   The pluck lane is tuned in just intonation: a 24-ratio gamut drawn
+   from the 3-, 5- and 7-limits (GAMUT below). Each limit can be
+   switched on or off, and every pluck step has its own pitch slider.
+   ===================================================================== */
+const LANES = [
+  { name: "kick",  len: 5,  color: "#e66", share: 0.45, voice: kick },
+  { name: "hat",   len: 7,  color: "#6ce", share: 1.0,  voice: hat },
+  { name: "pluck", len: 11, color: "#ec6", share: 0.7,  voice: pluck },
+  { name: "metal", len: 13, color: "#a8f", share: 0.5,  voice: metal },
+];
+
+// ---------- 24-tone just intonation gamut ----------
+// 11 ratios from the 3-limit (Pythagorean), 8 from the 5-limit,
+// 5 from the 7-limit. Swap any ratio here; the rest follows.
+const GAMUT = [
+  [1, 1], [28, 27], [256, 243], [16, 15], [10, 9], [9, 8], [8, 7], [7, 6],
+  [32, 27], [6, 5], [5, 4], [81, 64], [21, 16], [4, 3], [45, 32], [3, 2],
+  [128, 81], [8, 5], [5, 3], [27, 16], [7, 4], [16, 9], [15, 8], [243, 128],
+].map(([n, d]) => ({ n, d, r: n / d, limit: primeLimit(n * d), cents: 1200 * Math.log2(n / d) }))
+ .sort((a, b) => a.r - b.r);
+
+function primeLimit(x) {           // largest odd prime factor (1/1 counts as 1)
+  let lim = 1;
+  for (const p of [3, 5, 7]) while (x % p === 0) { x /= p; lim = p; }
+  return lim;
+}
+const limits = { 3: true, 5: true, 7: true };
+function activeGamut() { return GAMUT.filter((g) => g.limit === 1 || limits[g.limit]); }
+
+// each pluck step stores a position 0..1 across two octaves; it snaps to
+// whichever ratios are switched on, so changing limits re-tunes the line
+const pitchPos = [0, 0.3, 0.45, 0.15, 0.6, 0.3, 0.8, 0.2, 0.5, 0.7, 0.1, 0.4, 0.9, 0.35, 0.65, 0.25];
+
+function pluckPitch(step) {
+  const act = activeGamut(), N = act.length;
+  const slot = Math.round(pitchPos[step] * (2 * N - 1));
+  const g = act[slot % N], oct = Math.floor(slot / N);
+  return { g, oct, freq: +$("root").value * g.r * 2 ** oct, norm: slot / (2 * N - 1) };
+}
+
+let ctx, master, noiseBuf;
+let running = false, nextTime = 0, stepCount = 0, timer = null, pendingReset = false;
+let density = 0.4, brightness = 0.5;
+
+const $ = (id) => document.getElementById(id);
+
+// Euclidean pattern: k hits across n steps, as evenly as possible
+function euclid(k, n) {
+  return Array.from({ length: n }, (_, j) => k > 0 && (j * k) % n < k);
+}
+function regenerate() {
+  for (const L of LANES) {
+    const k = Math.round(density * L.share * L.len);
+    L.pattern = euclid(Math.max(L.name === "kick" ? 1 : 0, k), L.len);
+    L.head = (L.head || 0) % L.len;
+  }
+  drawGrid();
+  if ($("pitches").children.length) refreshPitches();
+}
+
+// ---------- grid UI ----------
+function drawGrid() {
+  const root = $("lanes");
+  root.innerHTML = "";
+  LANES.forEach((L, i) => {
+    const row = document.createElement("div");
+    row.className = "lane";
+    row.style.setProperty("--c", L.color);
+    row.innerHTML = `<span class="name">${L.name}</span>`;
+    const len = document.createElement("input");
+    len.type = "number"; len.min = 2; len.max = 16; len.value = L.len;
+    len.onchange = () => { L.len = Math.min(16, Math.max(2, +len.value || 2)); regenerate(); if (i === 2) buildPitches(); };
+    const steps = document.createElement("div");
+    steps.className = "steps";
+    L.pattern.forEach((on, j) => {
+      const b = document.createElement("div");
+      b.className = "step" + (on ? " on" : "");
+      b.onclick = () => { L.pattern[j] = !L.pattern[j]; b.classList.toggle("on"); if (i === 2) refreshPitches(); };
+      steps.appendChild(b);
+    });
+    row.append(len, steps);
+    root.appendChild(row);
+    L.cells = steps.children;
+  });
+}
+function showHeads(heads) {
+  LANES.forEach((L, i) => {
+    for (const c of L.cells) c.classList.remove("head");
+    if (L.cells[heads[i]]) L.cells[heads[i]].classList.add("head");
+  });
+  const cells = $("pitches").children;
+  for (const c of cells) c.classList.remove("head");
+  if (cells[heads[2]]) cells[heads[2]].classList.add("head");
+}
+
+// ---------- pitch panel UI ----------
+const ratioText = (g) => `${g.n}/${g.d}`;
+
+function drawGamut() {
+  const root = $("gamut");
+  root.innerHTML = "";
+  for (const g of GAMUT) {
+    const c = document.createElement("span");
+    c.className = `chip l${g.limit}` + (g.limit === 1 || limits[g.limit] ? "" : " off");
+    c.textContent = ratioText(g);
+    c.title = `${g.cents.toFixed(1)} cents, ${g.limit === 1 ? "root" : g.limit + "-limit"} (click to hear)`;
+    c.onclick = () => { if (ctx) playPluck(ctx.currentTime + 0.01, +$("root").value * g.r); };
+    root.appendChild(c);
+  }
+}
+function buildPitches() {
+  const root = $("pitches");
+  root.innerHTML = "";
+  const L = LANES[2];
+  for (let j = 0; j < L.len; j++) {
+    const cell = document.createElement("div");
+    cell.className = "pcell";
+    const lab = document.createElement("div"); lab.className = "ratio";
+    const sl = document.createElement("input");
+    sl.type = "range"; sl.min = 0; sl.max = 1; sl.step = 0.001; sl.value = pitchPos[j];
+    sl.oninput = () => { pitchPos[j] = +sl.value; refreshPitches(); };
+    const n = document.createElement("div"); n.className = "n"; n.textContent = j + 1;
+    cell.append(lab, sl, n);
+    root.appendChild(cell);
+  }
+  refreshPitches();
+}
+function refreshPitches() {
+  const cells = $("pitches").children;
+  for (let j = 0; j < cells.length; j++) {
+    const p = pluckPitch(j);
+    const lab = cells[j].querySelector(".ratio");
+    lab.textContent = ratioText(p.g) + (p.oct ? "'" : "");
+    lab.className = `ratio l${p.g.limit}`;
+    cells[j].title = `${p.freq.toFixed(1)} Hz`;
+    cells[j].classList.toggle("rest", !LANES[2].pattern[j]);
+    cells[j].querySelector("input").value = pitchPos[j];
+  }
+}
+for (const lim of [3, 5, 7]) {
+  $("lim" + lim).onchange = (e) => { limits[lim] = e.target.checked; drawGamut(); refreshPitches(); };
+}
+$("rand").onclick = () => { for (let j = 0; j < pitchPos.length; j++) pitchPos[j] = Math.random(); refreshPitches(); };
+$("flat").onclick = () => { pitchPos.fill(0); refreshPitches(); };
+
+// ---------- scheduler (look ahead so timing stays tight) ----------
+function stepDur(n) {
+  const base = 60 / +$("tempo").value / 4;
+  const sw = +$("swing").value;
+  return n % 2 === 0 ? base * (1 + sw) : base * (1 - sw);
+}
+function schedule() {
+  while (nextTime < ctx.currentTime + 0.12) {
+    playStep(nextTime);
+    nextTime += stepDur(stepCount);
+    stepCount++;
+  }
+}
+function playStep(t) {
+  if (pendingReset) { LANES.forEach((L) => (L.head = 0)); stepCount = 0; pendingReset = false; }
+
+  const heads = LANES.map((L) => L.head);
+  LANES.forEach((L) => { if (L.pattern[L.head]) L.voice(t, L.head); });
+
+  // the first two lanes line up again every 35 steps (5 x 7)
+  const aligned = stepCount > 0 && LANES[0].head === 0 && LANES[1].head === 0;
+
+  const delay = Math.max(0, (t - ctx.currentTime) * 1000);
+  setTimeout(() => {
+    showHeads(heads);
+    if (aligned) {
+      pulseP.emit();   // send only; don't reset myself
+      $("align").classList.add("flash");
+      setTimeout(() => $("align").classList.remove("flash"), 300);
+    }
+  }, delay);
+
+  LANES.forEach((L) => (L.head = (L.head + 1) % L.len));
+}
+
+// ---------- voices ----------
+function env(g, t, peak, decay) {
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(peak, t + 0.003);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+}
+function kick(t) {
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.frequency.setValueAtTime(160, t);
+  o.frequency.exponentialRampToValueAtTime(42, t + 0.12);
+  env(g, t, 0.9, 0.25 + brightness * 0.2);
+  o.connect(g).connect(master); o.start(t); o.stop(t + 0.5);
+}
+function hat(t, step) {
+  const s = ctx.createBufferSource(), f = ctx.createBiquadFilter(), g = ctx.createGain();
+  s.buffer = noiseBuf;
+  f.type = "highpass"; f.frequency.value = 4000 + brightness * 5000;
+  env(g, t, step % 3 === 0 ? 0.35 : 0.18, 0.02 + brightness * 0.08);
+  s.connect(f).connect(g).connect(master); s.start(t); s.stop(t + 0.2);
+}
+function pluck(t, step) {
+  const p = pluckPitch(step);
+  playPluck(t, p.freq);
+  setTimeout(() => noteP.emit(p.norm),
+             Math.max(0, (t - ctx.currentTime) * 1000));
+}
+function playPluck(t, freq) {
+  const o = ctx.createOscillator(), f = ctx.createBiquadFilter(), g = ctx.createGain();
+  o.type = "sawtooth"; o.frequency.value = freq;
+  f.type = "lowpass"; f.Q.value = 4;
+  f.frequency.setValueAtTime(Math.min(16000, freq * (2 + brightness * 14)), t);
+  f.frequency.exponentialRampToValueAtTime(Math.max(80, freq * 1.2), t + 0.3);
+  const decay = 0.25 + brightness * 0.6;
+  env(g, t, 0.25, decay);
+  o.connect(f).connect(g).connect(master); o.start(t); o.stop(t + decay + 0.1);
+}
+function metal(t, step) {
+  const base = 300 + ((step * 7) % 13) * 40;
+  const g = ctx.createGain(), f = ctx.createBiquadFilter();
+  f.type = "bandpass"; f.frequency.value = base * 2; f.Q.value = 3 + brightness * 10;
+  for (const ratio of [1, 1.414, 2.76]) {
+    const o = ctx.createOscillator();
+    o.type = "square"; o.frequency.value = base * ratio;
+    o.connect(f); o.start(t); o.stop(t + 0.3);
+  }
+  env(g, t, 0.12, 0.05 + brightness * 0.2);
+  f.connect(g).connect(master);
+}
+
+// ---------- start / stop ----------
+$("start").onclick = () => {
+  if (!ctx) {
+    ctx = new AudioContext();
+    master = ctx.createDynamicsCompressor();
+    const out = ctx.createGain(); out.gain.value = 0.6;
+    master.connect(out).connect(ctx.destination);
+    noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 0.2, ctx.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  ctx.resume();
+  if (running) return;
+  running = true;
+  nextTime = ctx.currentTime + 0.05;
+  timer = setInterval(schedule, 25);
+};
+$("stop").onclick = () => { running = false; clearInterval(timer); };
+
+// ---------- params: each one gets a routing strip next to its control ----------
+const densityP    = param("density",    { input: "density",    onChange: (v) => { density = v; regenerate(); } });
+const brightnessP = param("brightness", { input: "brightness", onChange: (v) => { brightness = v; } });
+const pulseP      = param("pulse",      { input: "pulse", kind: "trigger", onChange: () => { pendingReset = true; } });
+const tempoP      = param("tempo",      { input: "tempo", send: "personal", listen: "" });
+const swingP      = param("swing",      { input: "swing", send: "personal", listen: "" });
+const rootP       = param("root",       { input: "root",  anchor: "rootHz", send: "shared", listen: "/shared/root",
+  onChange: (v) => { $("rootHz").textContent = Math.round(v) + " Hz"; refreshPitches(); } });
+const noteP       = param("note",       { kind: "out", send: "personal" });
+
+regenerate();
+drawGamut();
+buildPitches();
+</script>
+</body>
+</html>

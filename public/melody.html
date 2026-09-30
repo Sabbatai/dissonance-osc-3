@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Just Melody</title>
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px; background: #111; color: #eee; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .status { font-size: 13px; color: #999; margin-bottom: 16px; }
+  .status.on { color: #6c6; }
+  label { display: block; margin: 12px 0 2px; }
+  input[type=range] { width: 100%; }
+  button { font: inherit; padding: 8px 14px; margin: 8px 8px 0 0; background: #333; color: #eee; border: 1px solid #555; border-radius: 4px; cursor: pointer; }
+  button.active { background: #4a4; border-color: #6c6; color: #fff; }
+  #log { margin-top: 20px; font: 12px/1.3 ui-monospace, monospace; color: #8a8; height: 120px; overflow: auto; background: #000; padding: 8px; border-radius: 4px; white-space: pre; }
+  .row { display: flex; gap: 16px; }
+  .row > label { flex: 1; min-width: 0; }
+
+  .l3 { color: #9bc; } .l5 { color: #ec6; } .l7 { color: #c8f; } .l1 { color: #fff; }
+  .panel { margin: 18px 0; padding: 12px; border: 1px solid #333; border-radius: 6px; }
+  .limits { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+  .limits > label { display: inline-flex; align-items: center; gap: 4px; margin: 0; }
+  .limits .root { flex: 1 1 100%; flex-wrap: wrap; }
+  .limits .root input { flex: 1; }
+
+  #now { font: 600 32px ui-monospace, monospace; height: 40px; margin: 6px 0 2px; }
+  #nowHz { font-size: 13px; color: #888; height: 18px; }
+
+  .octave { display: flex; gap: 3px; margin-top: 8px; }
+  .key { flex: 1; min-width: 0; height: 72px; display: flex; align-items: flex-end; justify-content: center;
+         padding-bottom: 4px; font: 10px ui-monospace, monospace; background: #1c1c1c; border: 1px solid #333;
+         border-radius: 3px; cursor: pointer; user-select: none; touch-action: none; overflow: hidden; }
+  .key span { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; }
+  .key.root { background: #262626; }
+  .key.lit { background: #444; border-color: #aaa; }
+  .keyhint { font-size: 12px; color: #777; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h1>Just Melody</h1>
+<div id="status" class="status">not connected</div>
+
+<button id="start">Start sound</button>
+<button id="auto">Auto phrase: off</button>
+<label>My name <input id="name" value="melody"></label>
+
+<div class="panel">
+  <div id="now">&nbsp;</div>
+  <div id="nowHz"></div>
+  <div class="limits">
+    <label class="l3"><input type="checkbox" id="lim3" checked> 3-limit</label>
+    <label class="l5"><input type="checkbox" id="lim5" checked> 5-limit</label>
+    <label class="l7"><input type="checkbox" id="lim7" checked> 7-limit</label>
+    <label class="root">root <input id="root" type="range" min="55" max="330" step="0.1" value="110"> <span id="rootHz">110 Hz</span></label>
+  </div>
+  <div id="keys"></div>
+  <div class="keyhint">Hold a key to play. Upper row is an octave up.</div>
+</div>
+
+<label>position (play by sliding, or route another player's notes here) <input id="position" type="range" min="0" max="1" step="0.001" value="0"></label>
+<div class="row">
+  <label>harmony (scale steps) <input id="harmony" type="range" min="-7" max="7" step="1" value="0"></label>
+  <label>glide <input id="glide" type="range" min="0" max="1" step="0.001" value="0.2"></label>
+</div>
+<label>tempo <input id="tempo" type="range" min="60" max="200" step="1" value="128"></label>
+<label>density <input id="density" type="range" min="0" max="1" step="0.001" value="0.5"></label>
+<label>brightness <input id="brightness" type="range" min="0" max="1" step="0.001" value="0.5"></label>
+<button id="pulse">land (pulse)</button>
+
+<div id="routing"></div>
+<div id="log"></div>
+
+<script src="osc-browser.min.js"></script>
+<script src="dissonance.js"></script>
+<script>
+/* =====================================================================
+   INSTRUMENT: monophonic melody voice in 24-tone just intonation
+   (network and routing strips come from dissonance.js)
+
+   Same 24 ratios as the sequencer's pluck (3-, 5-, 7-limit). With the
+   same limits switched on, a position value means the same pitch in
+   both instruments, so routing the sequencer's note into position
+   doubles its line; the harmony slider shifts it by scale steps.
+
+   density     auto phrase: how often it plays rather than rests
+   brightness  filter, vibrato depth
+   pulse       the next auto note lands on 1/1 and a new phrase starts
+   root        shared by default, so the room shares one tonic
+   position    0..1 across two octaves; moving it plays that pitch
+   note (out)  every note played, 0..1 across two octaves
+   ===================================================================== */
+const $ = (id) => document.getElementById(id);
+
+// ---------- tuning (same list as sequencer.html) ----------
+const GAMUT = [
+  [1, 1], [28, 27], [256, 243], [16, 15], [10, 9], [9, 8], [8, 7], [7, 6],
+  [32, 27], [6, 5], [5, 4], [81, 64], [21, 16], [4, 3], [45, 32], [3, 2],
+  [128, 81], [8, 5], [5, 3], [27, 16], [7, 4], [16, 9], [15, 8], [243, 128],
+].map(([n, d]) => ({ n, d, r: n / d, limit: primeLimit(n * d), cents: 1200 * Math.log2(n / d) }))
+ .sort((a, b) => a.r - b.r);
+function primeLimit(x) {
+  let lim = 1;
+  for (const p of [3, 5, 7]) while (x % p === 0) { x /= p; lim = p; }
+  return lim;
+}
+const limits = { 3: true, 5: true, 7: true };
+const active = () => GAMUT.filter((g) => g.limit === 1 || limits[g.limit]);
+const slotCount = () => active().length * 2;          // two octaves
+
+// any slot index, including below 0 or above the two octaves (harmony can push it there)
+function slotPitch(i) {
+  const act = active(), N = act.length;
+  const oct = Math.floor(i / N), g = act[((i % N) + N) % N];
+  return { g, oct, freq: +$("root").value * 2 * g.r * 2 ** oct };   // one octave above root
+}
+const ratioText = (g, oct) => `${g.n}/${g.d}` + (oct > 0 ? "'".repeat(oct) : oct < 0 ? ",".repeat(-oct) : "");
+
+// ---------- voice ----------
+let ctx, o1, o2, filter, amp, lfo, lfoGain, delay;
+
+function initAudio() {
+  ctx = new AudioContext();
+  const master = ctx.createDynamicsCompressor();
+  const out = ctx.createGain(); out.gain.value = 0.7;
+  master.connect(out).connect(ctx.destination);
+
+  o1 = ctx.createOscillator(); o1.type = "triangle";
+  o2 = ctx.createOscillator(); o2.type = "sawtooth";
+  const o2g = ctx.createGain(); o2g.gain.value = 0.35;
+  filter = ctx.createBiquadFilter(); filter.type = "lowpass"; filter.Q.value = 2;
+  amp = ctx.createGain(); amp.gain.value = 0;
+  o1.connect(filter); o2.connect(o2g).connect(filter); filter.connect(amp).connect(master);
+
+  lfo = ctx.createOscillator(); lfo.frequency.value = 5.2;
+  lfoGain = ctx.createGain(); lfoGain.gain.value = 0;
+  lfo.connect(lfoGain); lfoGain.connect(o1.frequency); lfoGain.connect(o2.frequency);
+
+  delay = ctx.createDelay(2);
+  const fb = ctx.createGain(); fb.gain.value = 0.35;
+  const wet = ctx.createGain(); wet.gain.value = 0.3;
+  amp.connect(delay); delay.connect(fb).connect(delay); delay.connect(wet).connect(master);
+  setDelay();
+
+  for (const o of [o1, o2, lfo]) o.start();
+}
+function setDelay() { if (delay) delay.delayTime.setTargetAtTime(Math.min(1.9, 3 * eighth()), ctx.currentTime, 0.1); }
+const eighth = () => 60 / tempoP.value / 2;
+
+// start (or glide to) a pitch at time t; release after dur seconds (0 = hold)
+function voiceAt(t, freq, dur) {
+  const gl = 0.004 + glideP.value * 0.3;
+  o1.frequency.setTargetAtTime(freq, t, gl / 3);
+  o2.frequency.setTargetAtTime(freq * 1.003, t, gl / 3);
+  amp.gain.setTargetAtTime(0.3, t, 0.012);
+  filter.frequency.setTargetAtTime(Math.min(12000, freq * (1.5 + brightnessP.value * 10)), t, 0.02);
+  lfoGain.gain.setValueAtTime(0, t);                                   // vibrato blooms in
+  lfoGain.gain.setTargetAtTime(freq * 0.004 * (0.2 + brightnessP.value), t + 0.15, 0.2);
+  if (dur) amp.gain.setTargetAtTime(0, t + dur, 0.07);
+}
+function release() { if (ctx) amp.gain.setTargetAtTime(0, ctx.currentTime, 0.1); }
+
+// play slot i (+ harmony) at time t, show it, send it
+function playSlot(i, t, dur) {
+  if (!ctx) return;
+  const s = i + Math.round(harmonyP.value);
+  const p = slotPitch(s);
+  voiceAt(t, p.freq, dur);
+  setTimeout(() => {
+    $("now").textContent = ratioText(p.g, p.oct);
+    $("now").className = "l" + p.g.limit;
+    $("nowHz").textContent = p.freq.toFixed(1) + " Hz";
+    lightKey(s);
+    noteP.emit(Math.min(1, Math.max(0, s / (slotCount() - 1))));
+  }, Math.max(0, (t - ctx.currentTime) * 1000));
+}
+
+// ---------- auto phrase: a weighted walk through the scale ----------
+let autoOn = false, timer = null, nextT = 0, cur = 0, phraseLeft = 0;
+const LIMIT_WEIGHT = { 1: 1.4, 3: 1, 5: 0.75, 7: 0.55 };
+
+function nextNote() {
+  if (Math.random() > 0.2 + densityP.value * 0.8) return null;        // rest
+  const N = active().length, S = N * 2;
+  if (phraseLeft <= 0) phraseLeft = 4 + Math.floor(Math.random() * 8);
+  phraseLeft--;
+  if (phraseLeft === 0) {                                              // cadence: nearest 1/1
+    cur = Math.abs(cur - 0) < Math.abs(cur - N) ? 0 : N;
+    return { idx: cur, len: 3 + Math.floor(Math.random() * 2) };
+  }
+  const cands = [];
+  for (const d of [-3, -2, -1, 1, 2, 3]) {
+    const i = cur + d;
+    if (i < 0 || i >= S) continue;
+    cands.push({ i, w: (1 / Math.abs(d)) * LIMIT_WEIGHT[slotPitch(i).g.limit] });
+  }
+  let r = Math.random() * cands.reduce((a, c) => a + c.w, 0);
+  for (const c of cands) { if ((r -= c.w) <= 0) { cur = c.i; break; } }
+  const lens = densityP.value > 0.6 ? [1, 1, 1, 2] : [1, 2, 2, 3];
+  return { idx: cur, len: lens[Math.floor(Math.random() * lens.length)] };
+}
+function tick() {
+  while (nextT < ctx.currentTime + 0.12) {
+    const d = eighth(), n = nextNote();
+    if (n) { playSlot(n.idx, nextT, n.len * d * 0.85); nextT += n.len * d; }
+    else nextT += d;
+  }
+}
+$("auto").onclick = () => {
+  if (!ctx) $("start").click();
+  autoOn = !autoOn;
+  $("auto").textContent = "Auto phrase: " + (autoOn ? "on" : "off");
+  $("auto").classList.toggle("active", autoOn);
+  if (autoOn) { nextT = ctx.currentTime + 0.05; timer = setInterval(tick, 25); }
+  else { clearInterval(timer); release(); }
+};
+$("start").onclick = () => { if (!ctx) initAudio(); ctx.resume(); };
+
+// ---------- keyboard ----------
+function buildKeys() {
+  const root = $("keys");
+  root.innerHTML = "";
+  const act = active(), N = act.length;
+  for (const oct of [1, 0]) {                        // upper octave on top
+    const row = document.createElement("div");
+    row.className = "octave";
+    act.forEach((g, j) => {
+      const k = document.createElement("div");
+      k.className = `key l${g.limit}` + (g.limit === 1 ? " root" : "");
+      k.innerHTML = `<span>${g.n}/${g.d}</span>`;
+      k.title = `${g.cents.toFixed(1)} cents`;
+      k.dataset.slot = oct * N + j;
+      k.onpointerdown = (e) => {
+        k.setPointerCapture(e.pointerId);
+        if (!ctx) $("start").click();
+        cur = oct * N + j;
+        playSlot(cur, ctx.currentTime, 0);
+      };
+      k.onpointerup = k.onpointercancel = release;
+      row.appendChild(k);
+    });
+    root.appendChild(row);
+  }
+}
+function lightKey(s) {
+  for (const k of document.querySelectorAll(".key")) k.classList.toggle("lit", +k.dataset.slot === s);
+}
+for (const lim of [3, 5, 7]) {
+  $("lim" + lim).onchange = (e) => { limits[lim] = e.target.checked; cur = 0; buildKeys(); };
+}
+
+// ---------- params: each gets a routing strip next to its control ----------
+let lastIdx = -1, lastAt = 0;
+const positionP = param("position", { input: "position", send: "personal", listen: "",
+  onChange: (v) => {
+    const i = Math.round(v * (slotCount() - 1)), now = performance.now();
+    if (i === lastIdx && now - lastAt < 80) return;   // ignore slider jitter, allow repeated incoming notes
+    lastIdx = i; lastAt = now; cur = i;
+    if (ctx) playSlot(i, ctx.currentTime, 0.45);
+  } });
+const harmonyP    = param("harmony",    { input: "harmony", send: "personal", listen: "" });
+const glideP      = param("glide",      { input: "glide",   send: "personal", listen: "" });
+const tempoP      = param("tempo",      { input: "tempo",   send: "personal", listen: "", onChange: setDelay });
+const densityP    = param("density",    { input: "density" });
+const brightnessP = param("brightness", { input: "brightness" });
+const pulseP      = param("pulse",      { input: "pulse", kind: "trigger", onChange: () => { phraseLeft = 1; } });
+const rootP       = param("root",       { input: "root", anchor: "rootHz", send: "shared", listen: "/shared/root",
+  onChange: (v) => { $("rootHz").textContent = Math.round(v) + " Hz"; } });
+const noteP       = param("note",       { kind: "out", send: "personal" });
+
+buildKeys();
+</script>
+</body>
+</html>
