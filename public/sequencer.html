@@ -81,6 +81,7 @@
 <button id="pulse">pulse (realign everyone)</button>
 
 <div id="routing"></div>
+<div id="seqDebug" style="margin-top:8px;font:11px ui-monospace,monospace;color:#6cf">scheduler debug: waiting</div>
 <div id="log"></div>
 
 <script src="osc-browser.min.js"></script>
@@ -144,6 +145,7 @@ function pluckPitch(step) {
 
 let ctx, master, noiseBuf;
 let running = false, nextTime = 0, stepCount = 0, timer = null, pendingReset = false;
+let dbgSchedCalls = 0, dbgSteps = 0, dbgLate = 0, dbgMaxLate = 0;
 let density = 0.4, brightness = 0.5;
 
 const $ = (id) => document.getElementById(id);
@@ -241,8 +243,13 @@ function refreshPitches() {
     cells[j].querySelector("input").value = pitchPos[j];
   }
 }
+function applyScale(mask) {
+  mask = Math.round(mask);
+  [3, 5, 7].forEach((lim, i) => { limits[lim] = !!(mask & (1 << i)); $("lim" + lim).checked = limits[lim]; });
+  drawGamut(); refreshPitches();
+}
 for (const lim of [3, 5, 7]) {
-  $("lim" + lim).onchange = (e) => { limits[lim] = e.target.checked; drawGamut(); refreshPitches(); };
+  $("lim" + lim).onchange = () => scaleP.set([3, 5, 7].reduce((m, l, i) => m | ($("lim" + l).checked ? 1 << i : 0), 0));
 }
 $("rand").onclick = () => { for (let j = 0; j < pitchPos.length; j++) pitchPos[j] = Math.random(); refreshPitches(); };
 $("flat").onclick = () => { pitchPos.fill(0); refreshPitches(); };
@@ -254,7 +261,11 @@ function stepDur(n) {
   return n % 2 === 0 ? base * (1 + sw) : base * (1 - sw);
 }
 function schedule() {
-  while (nextTime < ctx.currentTime + 0.12) {
+  dbgSchedCalls++;
+  while (nextTime < ctx.currentTime + lookahead()) {
+    const late = ctx.currentTime - nextTime;
+    if (late > 0.02) { dbgLate++; dbgMaxLate = Math.max(dbgMaxLate, late); }
+    dbgSteps++;
     playStep(nextTime);
     nextTime += stepDur(stepCount);
     stepCount++;
@@ -270,12 +281,12 @@ function playStep(t) {
   const aligned = stepCount > 0 && LANES[0].head === 0 && LANES[1].head === 0;
 
   const delay = Math.max(0, (t - ctx.currentTime) * 1000);
-  setTimeout(() => {
+  bgTimeout(() => {
     showHeads(heads);
     if (aligned) {
       pulseP.emit();   // send only; don't reset myself
       $("align").classList.add("flash");
-      setTimeout(() => $("align").classList.remove("flash"), 300);
+      bgTimeout(() => $("align").classList.remove("flash"), 300);
     }
   }, delay);
 
@@ -305,7 +316,7 @@ function hat(t, step) {
 function pluck(t, step) {
   const p = pluckPitch(step);
   playPluck(t, p.freq);
-  setTimeout(() => noteP.emit(p.norm),
+  bgTimeout(() => noteP.emit(p.norm),
              Math.max(0, (t - ctx.currentTime) * 1000));
 }
 function playPluck(t, freq) {
@@ -346,9 +357,12 @@ $("start").onclick = () => {
   if (running) return;
   running = true;
   nextTime = ctx.currentTime + 0.05;
-  timer = setInterval(schedule, 25);
+  timer = bgInterval(schedule, 25);
+  bgInterval(() => {
+    $("seqDebug").textContent = `scheduler debug — calls ${dbgSchedCalls} | steps ${dbgSteps} | late steps ${dbgLate} | max late ${dbgMaxLate.toFixed(3)}s | lookahead ${lookahead().toFixed(2)}s | ctx ${ctx.state}`;
+  }, 250);
 };
-$("stop").onclick = () => { running = false; clearInterval(timer); };
+$("stop").onclick = () => { running = false; clearBg(timer); };
 
 // ---------- params: each one gets a routing strip next to its control ----------
 const densityP    = param("density",    { input: "density",    onChange: (v) => { density = v; regenerate(); } });
@@ -359,6 +373,9 @@ const swingP      = param("swing",      { input: "swing", send: "personal", list
 const rootP       = param("root",       { input: "root",  anchor: "rootHz", send: "shared", listen: "/shared/root",
   onChange: (v) => { $("rootHz").textContent = Math.round(v) + " Hz"; refreshPitches(); } });
 const noteP       = param("note",       { kind: "out", send: "personal" });
+// the 3/5/7-limit switches as one control (bits: 3=1, 5=2, 7=4), shared so
+// that note positions mean the same ratios on every just-intonation instrument
+const scaleP      = param("scale",      { min: 0, max: 7, value: 7, anchor: $("lim7").parentElement, onChange: applyScale });
 
 regenerate();
 drawGamut();

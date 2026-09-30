@@ -3,6 +3,10 @@
 // Wire format: mono 16-bit samples at 48 kHz, 512 samples per packet
 // (about 10.7 ms). Both ends resample if their AudioContext runs at a
 // different rate.
+//
+// Packets go straight between these worklets and a network worker over
+// a MessageChannel, never through the page's main thread, so a page the
+// browser is starving (covered window, background) still streams.
 
 const WIRE_RATE = 48000;
 const PACKET = 512;
@@ -18,9 +22,21 @@ class DissonanceSend extends AudioWorkletProcessor {
     this.n = 0;
     this.on = true;
     this.mono = new Float32Array(128);
-    this.port.onmessage = (e) => { if ("on" in e.data) this.on = e.data.on; };
+    this.out = null;   // MessagePort to the network worker
+    this._blocks = 0;
+    this._packets = 0;
+    this._lastStatsFrame = 0;
+    this.port.onmessage = (e) => {
+      if (e.data.port) this.out = e.data.port;
+      if ("on" in e.data) this.on = e.data.on;
+    };
   }
   process(inputs) {
+    this._blocks++;
+    if (currentFrame - this._lastStatsFrame >= sampleRate) {
+      this._lastStatsFrame = currentFrame;
+      this.port.postMessage({ __dissSendStats: true, blocks: this._blocks, packets: this._packets, frame: currentFrame });
+    }
     const inp = inputs[0];
     if (!this.on || !inp || !inp.length) return true;
     const len = inp[0].length;
@@ -37,8 +53,7 @@ class DissonanceSend extends AudioWorkletProcessor {
       const s = Math.max(-1, Math.min(1, a + (b - a) * f));
       this.buf[this.n++] = s * 32767;
       if (this.n === PACKET) {
-        this.port.postMessage(this.buf.buffer, [this.buf.buffer]);
-        this.buf = new Int16Array(PACKET);
+        if (this.out) { this.out.postMessage(this.buf.buffer, [this.buf.buffer]); this.buf = new Int16Array(PACKET); this._packets++; }
         this.n = 0;
       }
       this.t += this.step;
@@ -65,10 +80,14 @@ class DissonanceReceive extends AudioWorkletProcessor {
     this.r = 0;        // read position (absolute, fractional)
     this.playing = false;
     this.step = WIRE_RATE / sampleRate;
-    this.port.onmessage = (e) => {
-      const pcm = new Int16Array(e.data);
+    const write = (data) => {
+      const pcm = new Int16Array(data);
       for (let i = 0; i < pcm.length; i++) this.ring[(this.w + i) % this.size] = pcm[i] / 32768;
       this.w += pcm.length;
+    };
+    this.port.onmessage = (e) => {
+      if (e.data && e.data.port) e.data.port.onmessage = (ev) => write(ev.data);
+      else write(e.data);
     };
   }
   process(_inputs, outputs) {

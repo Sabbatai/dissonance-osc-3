@@ -71,11 +71,18 @@ async function main() {
   });
 
   // ---------- control hub (OSC over WebSocket) ----------
+  // The relay remembers the latest value sent to every address, and
+  // sends that snapshot to each browser as it joins, so a page opened
+  // late starts in step with the room (same root, density, scale...).
+  // Triggers (messages with no value) aren't remembered. Restart the
+  // relay to forget everything.
   const sockets = new Set();
+  const latest = new Map();   // address -> last message
   controlWss.on("connection", (raw, req) => {
     const port = new osc.WebSocketPort({ socket: raw, metadata: true });
     sockets.add(port);
     log(`browser joined (${req.socket.remoteAddress}), ${sockets.size} connected`);
+    setTimeout(() => { for (const m of latest.values()) { try { port.send(m); } catch (_) {} } }, 50);
     port.on("message", (msg) => relay(msg, port));
     port.on("close", () => { sockets.delete(port); log(`browser left, ${sockets.size} connected`); });
     port.on("error", () => {});
@@ -122,6 +129,7 @@ async function main() {
   // One place to intervene in the room's control traffic: delay it,
   // drop it, invert values, remap addresses...
   function relay(msg, fromSocket, fromUdpKey) {
+    if (msg.args && msg.args.length) latest.set(msg.address, msg);
     for (const s of sockets) if (s !== fromSocket) { try { s.send(msg); } catch (_) {} }
     for (const [key, p] of udpPeers) if (key !== fromUdpKey) udp.send(msg, p.address, p.port);
     if (process.env.QUIET !== "1") log(fmt(msg));

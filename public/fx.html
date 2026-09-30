@@ -101,8 +101,8 @@ function freeze() {
   if (!ctx) return;
   frozen = true;
   fb.gain.setTargetAtTime(0.98, ctx.currentTime, 0.01);
-  clearTimeout(freeze.t);
-  freeze.t = setTimeout(() => { frozen = false; update(); }, 2000);
+  clearBg(freeze.t);
+  freeze.t = bgTimeout(() => { frozen = false; update(); }, 2000);
 }
 
 const ringfreqP   = param("ringfreq",   { input: "ringfreq", send: "personal", listen: "", onChange: update });

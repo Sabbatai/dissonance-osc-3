@@ -73,6 +73,10 @@ can't feed back endlessly.
 
 Give each player a distinct name; personal addresses use it.
 
+The relay remembers the latest value sent to every address and hands
+that snapshot to anyone who joins, so a page opened late starts in step
+with the room. Restart the relay to clear it.
+
 ## Audio routing
 
 Instruments can send their sound into the room and take in each other's
@@ -98,6 +102,11 @@ stays loud but not destructive.
 Each stream is mono, 48 kHz, 16-bit: about 0.8 Mbit/s up to the relay,
 and the same again for each listener. A travel router handles a
 workshop group comfortably.
+
+Browsers slow down ordinary timers in a window that is hidden or
+covered and silent on its own laptop (for example "my speakers" off
+while the mixer is in front). The instruments here keep time with
+worker-driven timers from `dissonance.js`, which aren't slowed.
 
 Backup plan if audio over the network misbehaves on the day: set
 **send audio** off everywhere, play through laptop speakers, and let
@@ -127,6 +136,10 @@ smallest) and ask for a new one. Something like:
 > (not ctx.destination). To process another player's sound, use
 > audioIn("input", { anchor: "<id of an element>" }), which returns a
 > node to connect into the effect.
+> For anything timed (sequencers, arpeggios, auto-play), use
+> bgInterval(fn, ms) / bgTimeout(fn, ms) / clearBg(id) instead of
+> setInterval / setTimeout, so timing holds when the window is in the
+> background.
 
 Save the result as a new file in `public/` (e.g. `public/ana.html`)
 and open `https://<relay-ip>:8443/ana.html`. The routing strips appear
@@ -153,8 +166,12 @@ by themselves.
   **harmony** shifts the line by scale steps. Params: position,
   harmony, glide, tempo, density, brightness, pulse, root, note (out).
 
-Root is shared by default on both the sequencer and the melody
-(`/shared/root`), so they stay on the same tonic.
+Root and scale are shared by default on both the sequencer and the
+melody (`/shared/root`, `/shared/scale`), so they stay on the same
+tonic and the same set of ratios. Scale packs the three limit switches
+into one control, which is what lets a note position mean the same
+ratio on both. To have the melody play the sequencer's exact notes,
+set melody **position** to listen to the sequencer's note.
 
 - `fx.html`: an effect. Pick whose sound it processes in its audio in
   strip: ring modulator into a filtered feedback delay. Density sets

@@ -48,6 +48,12 @@
                              sound; its strip picks whose. Connect it
                              into your effect. A limiter guards loops.
 
+   Timing: use bgInterval(fn, ms) / bgTimeout(fn, ms) / clearBg(id) for
+   anything musical instead of setInterval / setTimeout. They keep time
+   when the window is in the background. Schedule notes up to
+   ctx.currentTime + lookahead() seconds ahead: it grows when the
+   browser is starving the page, so timing holds.
+
    Lower-level, bypassing routing:
      send(address, value)   on(address, fn)   on("*", fn)
    ===================================================================== */
@@ -277,6 +283,16 @@
         ? actx.audioWorklet.addModule("audio-worklet.js")
         : Promise.reject(new Error("open the https:// address to route audio"));
       workletReady.catch((e) => logLine("audio routing unavailable: " + e.message));
+
+      // Keep-alive: Chrome starves pages that are covered or in the
+      // background AND silent (e.g. "my speakers" off while another window
+      // is in front), which makes instruments drop out. A 15 Hz tone at
+      // about -50 dB keeps the page counted as playing. It is far below
+      // hearing and what laptop speakers can reproduce, and it only goes
+      // to this laptop's output, never into the room.
+      const hum = actx.createOscillator(), humGain = actx.createGain();
+      hum.frequency.value = 15; humGain.gain.value = 0.003;
+      hum.connect(humGain).connect(actx.destination); hum.start();
     }
     actx.resume();
     return actx;
@@ -293,27 +309,31 @@
     const st = { net: loadA("out-net", true), speaker: loadA("out-speaker", true) };
     speaker.gain.value = st.speaker ? 1 : 0;
 
-    let ws = null, sendNode = null, as = null;
+    let sendNode = null, as = null, netId = 0;
     const dot = mkDot();
+    const dbg = document.createElement("span");
+    dbg.style.cssText = "display:block;font:11px ui-monospace,monospace;color:#f6c;margin:3px 0";
+    dbg.textContent = "audio debug: waiting";
+    let renderBlocks = 0, workletPackets = 0, workerSends = 0;
+    window.__dissAudioDebug = () => ({ renderBlocks, workletPackets, workerSends, contextState: ctx.state, hidden: document.hidden, focus: document.hasFocus() });
+    window.addEventListener("diss-pubstats", (e) => { workerSends = e.detail.sends || workerSends; paintDbg(); });
+    function paintDbg() { dbg.textContent = `audio debug — render blocks ${renderBlocks} | worklet packets ${workletPackets} | WS sends ${workerSends} | ctx ${ctx.state}`; }
     function connect() {
       if (!sendNode) return;
       const want = st.net ? myName() : null;
-      if (want === as && ws) return;
-      if (ws) { ws.onclose = null; ws.close(); ws = null; }
+      if (want === as) return;
+      netClose(netId); netId = 0;
       as = want;
       sendNode.port.postMessage({ on: !!want });
-      if (!want) return;
-      ws = new WebSocket(`${WS}://${location.host}/audio?pub=${encodeURIComponent(want)}`);
-      ws.onclose = () => { ws = null; setTimeout(connect, 1000); };
+      if (want) netId = netOpen("pub", want, sendNode, dot);
     }
     workletReady.then(() => {
       sendNode = new AudioWorkletNode(ctx, "dissonance-send");
+      sendNode.port.onmessage = (e) => {
+        if (e.data && e.data.__dissSendStats) { renderBlocks = e.data.blocks; workletPackets = e.data.packets; paintDbg(); }
+      };
       const sink = ctx.createGain(); sink.gain.value = 0;
       bus.connect(sendNode); sendNode.connect(sink).connect(ctx.destination);   // keeps it running everywhere
-      let n = 0;
-      sendNode.port.onmessage = (e) => {
-        if (ws && ws.readyState === 1) { ws.send(e.data); if (++n % 8 === 0) pulseDot(dot); }
-      };
       connect();
     }).catch(() => {});
     onNameChange(connect);
@@ -322,6 +342,7 @@
       toggle("send audio", st.net, (v) => { st.net = v; saveA("out-net", v); connect(); }),
       toggle("my speakers", st.speaker, (v) => { st.speaker = v; saveA("out-speaker", v); speaker.gain.setTargetAtTime(v ? 1 : 0, ctx.currentTime, 0.02); }));
     placeStrip(o.anchor || "start", "audio out", strip);
+    strip.after(dbg);
     outBus = bus;
     strip.before(stopButton());
     return bus;
@@ -370,7 +391,7 @@
     A.dot = mkDot();
     function subscribe() {
       const g = ++A.gen;
-      if (A.ws) { A.ws.onclose = null; A.ws.close(); A.ws = null; }
+      netClose(A.netId); A.netId = 0;
       if (A.recv) { A.recv.disconnect(); A.recv = null; }
       if (!A.source) return;
       workletReady.then(() => {
@@ -378,11 +399,7 @@
         A.recv = new AudioWorkletNode(ctx, "dissonance-receive", {
           numberOfInputs: 0, outputChannelCount: [1], processorOptions: { bufferMs: o.bufferMs || 60 } });
         A.recv.connect(limiter);
-        const ws = A.ws = new WebSocket(`${WS}://${location.host}/audio?sub=${encodeURIComponent(A.source)}`);
-        ws.binaryType = "arraybuffer";
-        let n = 0;
-        ws.onmessage = (e) => { if (A.recv) A.recv.port.postMessage(e.data, [e.data]); if (++n % 8 === 0) pulseDot(A.dot); };
-        ws.onclose = () => { if (g === A.gen) setTimeout(subscribe, 1000); };
+        A.netId = netOpen("sub", A.source, A.recv, A.dot);
       }).catch(() => {});
     }
     out.setSource = (name) => { A.source = name || ""; if (A.sel) A.sel.value = A.source; subscribe(); };
@@ -398,6 +415,69 @@
     subscribe();
     pollStreams();
     return out;
+  }
+
+  // ---------- network worker for audio ----------
+  // Owns the audio WebSockets and talks to the worklets over
+  // MessageChannels, so audio never waits on the page's main thread.
+  const NET_SRC = `
+    const socks = new Map();
+    onmessage = (e) => {
+      const m = e.data;
+      if (m.cmd === "open") {
+        const s = { id: m.id, url: m.url, kind: m.kind, port: m.port, closed: false, ws: null, n: 0 };
+        socks.set(m.id, s);
+        if (s.kind === "pub") s.port.onmessage = (ev) => {
+          if (s.ws && s.ws.readyState === 1) {
+            s.ws.send(ev.data);
+            s.n++;
+            if (s.n % 8 === 0) postMessage(s.id);
+            if (s.n % 50 === 0) postMessage({kind:"pubstats", id:s.id, sends:s.n});
+          }
+        };
+        connect(s);
+      } else if (m.cmd === "close") {
+        const s = socks.get(m.id);
+        if (s) { s.closed = true; if (s.ws) s.ws.close(); s.port.close(); socks.delete(m.id); }
+      }
+    };
+    function connect(s) {
+      if (s.closed) return;
+      const ws = s.ws = new WebSocket(s.url);
+      ws.binaryType = "arraybuffer";
+      if (s.kind === "sub") ws.onmessage = (ev) => {
+        s.port.postMessage(ev.data, [ev.data]);
+        if (++s.n % 8 === 0) postMessage(s.id);
+      };
+      ws.onclose = () => { s.ws = null; if (!s.closed) setTimeout(() => connect(s), 1000); };
+      ws.onerror = () => {};
+    }`;
+  let netWorker = null, netSeq = 0;
+  const netDots = new Map();
+  function netOpen(kind, name, node, dot) {
+    if (!netWorker) {
+      netWorker = new Worker(URL.createObjectURL(new Blob([NET_SRC], { type: "text/javascript" })));
+      netWorker.onmessage = (e) => {
+        const msg = e.data;
+        const id = (msg && typeof msg === "object") ? msg.id : msg;
+        const d = netDots.get(id); if (d) pulseDot(d);
+        if (msg && typeof msg === "object" && msg.kind === "pubstats") {
+          window.dispatchEvent(new CustomEvent("diss-pubstats", { detail: msg }));
+        }
+      };
+    }
+    const ch = new MessageChannel();
+    node.port.postMessage({ port: ch.port1 }, [ch.port1]);
+    const id = ++netSeq;
+    netDots.set(id, dot);
+    netWorker.postMessage({ cmd: "open", id, kind,
+      url: `${WS}://${location.host}/audio?${kind}=${encodeURIComponent(name)}`, port: ch.port2 }, [ch.port2]);
+    return id;
+  }
+  function netClose(id) {
+    if (!id || !netWorker) return;
+    netWorker.postMessage({ cmd: "close", id });
+    netDots.delete(id);
   }
 
   // who is streaming: polled from the relay
@@ -452,6 +532,47 @@
   function saveA(k, v) { try { localStorage.setItem(key("audio-" + k), JSON.stringify(v)); } catch (_) {} }
   function loadA(k, d) { try { const v = JSON.parse(localStorage.getItem(key("audio-" + k))); return v ?? d; } catch (_) { return d; } }
 
+  // ---------- timers that keep going in the background ----------
+  // Browsers slow ordinary setTimeout/setInterval to about once a second
+  // when a page is hidden or covered and not playing sound on this
+  // laptop (for example "my speakers" off while the mixer window is in
+  // front). Anything musical should use these instead: a worker ticks
+  // every 5 ms, and workers aren't slowed down.
+  //   const id = bgInterval(fn, ms)   bgTimeout(fn, ms)   clearBg(id)
+  let clockWorker = null, timerId = 0;
+  const timers = new Map();
+  function bgTimer(fn, ms, repeat) {
+    if (!clockWorker) {
+      const src = "setInterval(function(){postMessage(0)},5)";
+      clockWorker = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+      clockWorker.onmessage = () => {
+        const now = performance.now();
+        if (lastTick) worstGap = Math.max(now - lastTick, worstGap * 0.995);
+        lastTick = now;
+        for (const [id, t] of timers) {
+          if (now < t.due) continue;
+          if (t.repeat) t.due = now + t.ms; else timers.delete(id);
+          try { t.fn(); } catch (e) { console.error(e); }
+        }
+      };
+    }
+    const id = ++timerId;
+    timers.set(id, { fn, ms: Math.max(0, ms || 0), repeat, due: performance.now() + Math.max(0, ms || 0) });
+    return id;
+  }
+  // How far ahead (seconds) a sequencer should schedule notes. Normally
+  // 0.12 s; when the page is hidden or its clock ticks arrive late (the
+  // browser starving it), up to 2 s, so the audio engine already holds
+  // the upcoming notes and plays them on time regardless.
+  let lastTick = 0, worstGap = 0;
+  function lookahead() {
+    const hidden = document.visibilityState === "hidden";
+    return Math.min(2, Math.max(hidden ? 1.2 : 0.12, (worstGap / 1000) * 1.5 + 0.05));
+  }
+  const bgInterval = (fn, ms) => bgTimer(fn, ms, true);
+  const bgTimeout = (fn, ms) => bgTimer(fn, ms, false);
+  const clearBg = (id) => timers.delete(id);
+
   // ---------- status + log (created if the page doesn't have them) ----------
   function setStatus(ok) {
     let el = $id("status");
@@ -487,5 +608,5 @@
   }
 
   onNameChange(() => params.forEach(fillListen));
-  Object.assign(window, { param, send, on, logLine, setStatus, audioContext, audioOut, audioIn, onStreams, stopButton });
+  Object.assign(window, { param, send, on, logLine, setStatus, audioContext, audioOut, audioIn, onStreams, stopButton, bgInterval, bgTimeout, clearBg, lookahead });
 })();

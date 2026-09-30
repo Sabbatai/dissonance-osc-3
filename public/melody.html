@@ -166,7 +166,7 @@ function playSlot(i, t, dur) {
   const s = i + Math.round(harmonyP.value);
   const p = slotPitch(s);
   voiceAt(t, p.freq, dur);
-  setTimeout(() => {
+  bgTimeout(() => {
     $("now").textContent = ratioText(p.g, p.oct);
     $("now").className = "l" + p.g.limit;
     $("nowHz").textContent = p.freq.toFixed(1) + " Hz";
@@ -200,7 +200,7 @@ function nextNote() {
   return { idx: cur, len: lens[Math.floor(Math.random() * lens.length)] };
 }
 function tick() {
-  while (nextT < ctx.currentTime + 0.12) {
+  while (nextT < ctx.currentTime + lookahead()) {
     const d = eighth(), n = nextNote();
     if (n) { playSlot(n.idx, nextT, n.len * d * 0.85); nextT += n.len * d; }
     else nextT += d;
@@ -211,8 +211,8 @@ $("auto").onclick = () => {
   autoOn = !autoOn;
   $("auto").textContent = "Auto phrase: " + (autoOn ? "on" : "off");
   $("auto").classList.toggle("active", autoOn);
-  if (autoOn) { nextT = ctx.currentTime + 0.05; timer = setInterval(tick, 25); }
-  else { clearInterval(timer); release(); }
+  if (autoOn) { nextT = ctx.currentTime + 0.05; timer = bgInterval(tick, 25); }
+  else { clearBg(timer); release(); }
 };
 $("start").onclick = () => { if (!ctx) initAudio(); ctx.resume(); };
 
@@ -245,8 +245,13 @@ function buildKeys() {
 function lightKey(s) {
   for (const k of document.querySelectorAll(".key")) k.classList.toggle("lit", +k.dataset.slot === s);
 }
+function applyScale(mask) {
+  mask = Math.round(mask);
+  [3, 5, 7].forEach((lim, i) => { limits[lim] = !!(mask & (1 << i)); $("lim" + lim).checked = limits[lim]; });
+  cur = 0; buildKeys();
+}
 for (const lim of [3, 5, 7]) {
-  $("lim" + lim).onchange = (e) => { limits[lim] = e.target.checked; cur = 0; buildKeys(); };
+  $("lim" + lim).onchange = () => scaleP.set([3, 5, 7].reduce((m, l, i) => m | ($("lim" + l).checked ? 1 << i : 0), 0));
 }
 
 // ---------- params: each gets a routing strip next to its control ----------
@@ -267,6 +272,9 @@ const pulseP      = param("pulse",      { input: "pulse", kind: "trigger", onCha
 const rootP       = param("root",       { input: "root", anchor: "rootHz", send: "shared", listen: "/shared/root",
   onChange: (v) => { $("rootHz").textContent = Math.round(v) + " Hz"; } });
 const noteP       = param("note",       { kind: "out", send: "personal" });
+// the 3/5/7-limit switches as one control (bits: 3=1, 5=2, 7=4), shared so
+// that note positions mean the same ratios as the sequencer's
+const scaleP      = param("scale",      { min: 0, max: 7, value: 7, anchor: $("lim7").parentElement, onChange: applyScale });
 
 buildKeys();
 </script>
