@@ -1,190 +1,337 @@
-# Dissonance OSC relay
+# Dissonance: networked browser instruments
 
-One laptop runs the relay. Everyone else opens a web page, or connects
-from SuperCollider / Pd / Max / TouchDesigner / Python. Every message
-anyone sends reaches everyone else.
+A small system for improvising together with instruments that run in a
+web browser. Everyone's instruments share their controls with each
+other: you can let another player's slider move yours, follow their
+notes, or process their sound. You can also ask an AI chatbot (an LLM
+such as ChatGPT or Claude) to build a new instrument that joins in.
 
-```
- browser ──┐                                   ┌── browser
- browser ──┼── WebSocket (control + audio) ─ relay ─ UDP OSC ──┼── SuperCollider / Pd / Max
- browser ──┘          (https port 8443)          (57121 in)   └── ...
-```
+It was made for the Dissonance Workshop at NordiCHI 2026 in Vaasa.
 
-## Run it
+**How it fits together:** one laptop (the *host*) runs a small program
+called the **relay**. Everyone else opens a web address that the relay
+gives them. The relay passes every control move and every sound stream
+between the players. Nothing goes to the internet; it all stays on the
+local Wi-Fi.
 
-Needs Node.js 18 or newer. The first time, install the two dependencies
-(needs internet once; after that it all runs offline):
+Jump to:
+- [Joining and playing](#joining-and-playing) if you are a participant
+- [Making your own instrument](#making-your-own-instrument-with-an-llm)
+- [Running the relay](#running-the-relay-for-hosts) if you are hosting
+- [Troubleshooting](#troubleshooting)
+- [Technical reference](#technical-reference) for developers
 
-```
-npm install
-```
+---
 
-Then start the relay:
+## Joining and playing
 
-```
-npm start
-```
+You need a laptop with **Chrome** (Edge and Firefox also work) on the
+same Wi-Fi as the host.
 
-It prints the address to share, e.g. `https://192.168.1.20:8443`.
-Participants open that in a browser, press **Start sound**, and move sliders.
-Open it in two tabs on one laptop to test alone.
+1. **Open the address the host gives you.** It looks like
+   `https://192.168.1.20:8443`. Type the whole thing, including
+   `https://` and `:8443`.
+2. **Get past the security warning (once).** The relay makes its own
+   security certificate, so the browser doesn't recognise it and
+   warns you. This is expected. In Chrome click **Advanced**, then
+   **Proceed**. (Firefox: **Advanced**, then **Accept the risk**.
+   Safari: **Show details**, then **visit this website**.)
+3. **Pick an instrument** by adding its name to the address, for
+   example `https://192.168.1.20:8443/melody.html`. See
+   [the instruments](#the-instruments) below.
+4. **Type your name** in the "My name" box. Everyone needs a
+   different name, because it is how others find your controls and
+   your sound.
+5. **Press Start sound.** Browsers only allow sound after a click.
 
-**The certificate warning.** Browsers only allow audio streaming on
-secure (https) pages, so the relay makes its own certificate the first
-time it runs (saved in `cert/`, not in git). Every browser shows a
-warning once: Chrome "Advanced, then Proceed", Firefox "Advanced, then
-Accept the risk", Safari "Show details, then visit this website".
-The old `http://...:8080` address redirects to https.
+If the host is playing everything through a PA system, set
+**my speakers** to **off** (next to Start) so the room only hears the
+PA.
 
-`QUIET=1 node server.js` hides the message log.
+### The controls next to each slider
 
-## Shared schema
+Every slider or button has a small strip of controls beside it. They
+decide how that control connects to other players:
 
-| address | value |
+| Control | What it does |
 |---|---|
-| `/shared/<param>` | float 0..1 (or no args for a trigger) |
-| `/player/<name>/<param>` | float 0..1, one player's own parameter |
+| **dot** | Lights up green when someone else is moving this control. |
+| **in** | Who controls this. `none` means only you. Pick an entry to let that control follow it: `shared density` follows the room's density, `ana pitch` follows Ana's pitch slider, and so on. New entries appear as other players start moving things. |
+| **inv** | Flips what comes in (high becomes low). Only shows while **in** is set. |
+| **out** | Who hears you. `off`: nobody. `shared`: the room's common control of that name. `mine`: under your name, for others to pick if they want. `both`: shared and mine. |
 
-`density`, `brightness` and `pulse` are the common ones every instrument
-starts with. Any other parameter can be shared under `/shared/<name>`
-too; others will see it appear in their menus once it has been sent.
+Bright menus are active; dimmed ones are off.
 
-## Routing: who controls what
+Three controls are **shared** by default on every instrument:
+**density**, **brightness** and **pulse**. When anyone moves one, it
+moves for everyone who is listening to it. Just intonation instruments
+also share their **root** and **scale**, so they stay in tune with
+each other.
 
-Every instrument loads `public/dissonance.js`, which handles the
-network and puts a small routing strip right next to each control:
+Your choices are remembered in your browser, so a reload keeps them.
 
-- **dot:** lights when someone else is moving this control
-- **in:** none, or any address heard on the network. New addresses
-  (another player's pitch, a sequencer's notes) are added as soon as
-  they arrive, so your root can follow someone's pitch, your density
-  can follow someone's melody, and so on.
-- **inv:** flip incoming values; only appears while listening
-- **out:** off, shared (`/shared/<param>`), mine
-  (`/player/<my name>/<param>`), or both
+### The sound controls next to Start
 
-Active choices are bright, inactive ones dimmed. Parameters without a
-control of their own (like the sequencer's `note` output) get their
-strip near the bottom of the page.
+| Control | What it does |
+|---|---|
+| **Stop sound / Resume sound** | Pauses everything this page is doing with sound. Pressing Start also resumes. |
+| **send audio** | `on` sends your sound into the room: it appears on the mixer and others can process it. |
+| **my speakers** | `on` plays your sound on your own laptop. Turn it off when the PA is in use. |
+| **audio in** (effects only) | Whose sound this effect processes. |
 
-Choices are remembered per page in that browser. Values received from
-others are never re-sent, so two instruments listening to each other
-can't feed back endlessly.
+### The instruments
 
-Give each player a distinct name; personal addresses use it.
+| Address | What it is |
+|---|---|
+| `/` (or `/index.html`) | **Drone.** Two detuned tones. The simplest instrument, and the template for making your own. |
+| `/sequencer.html` | **Odd Sequencer.** Four rhythm lanes of 5, 7, 11 and 13 steps that drift against each other. Click steps on and off. The pluck lane is tuned in just intonation, with a pitch slider per step. |
+| `/melody.html` | **Just Melody.** A single melodic voice in the same tuning as the sequencer. Play it with the on-screen keys, turn on **Auto phrase** to let it improvise, or set **position**'s **in** to another player's `note` to play their exact notes (use **harmony** to play a parallel line). |
+| `/fx.html` | **Ring Delay FX.** An effect: choose whose sound to process in **audio in**, then shape it with a ring modulator and a feedback delay. **pulse** freezes the delay for two seconds. |
+| `/mixer.html` | **Room Mixer.** For the laptop connected to the PA. Every player who is sending audio gets a channel with a fader, mute (M), solo (S) and a level meter. |
 
-The relay remembers the latest value sent to every address and hands
-that snapshot to anyone who joins, so a page opened late starts in step
-with the room. Restart the relay to clear it.
+### Good to know
 
-## Audio routing
+- **Sound through the network arrives a little late:** about 80 ms
+  for each hop. An instrument heard through an effect and then the
+  mixer is about 160 ms behind. It suits textures and layers better
+  than tightly locked rhythm.
+- **Loops are allowed.** If you process someone's sound while they
+  process yours, you get a feedback loop. A limiter keeps it from
+  getting destructively loud.
+- **Keep your instrument open while you work in other windows.** It
+  keeps playing in the background.
 
-Instruments can send their sound into the room and take in each other's
-sound, all through the relay.
+---
 
-- Every instrument has an **audio out** strip by its Start button:
-  **send audio** (stream to the room) and **my speakers** (play on
-  this laptop).
-- An effect takes another player's sound with an **audio in** strip:
-  pick whose sound to process from the menu.
-- `mixer.html` runs on the laptop connected to the PA. Every
-  instrument sending audio gets a channel with fader, mute, solo and
-  meter, plus a master fader with a limiter. When the PA is in use,
-  players set **my speakers** to off.
+## Making your own instrument with an LLM
 
-Delay is about 80 ms per hop on a quiet network (a 60 ms buffer
-absorbs Wi-Fi jitter). So instrument -> effect -> mixer is about
-160 ms behind the player: fine for textures and effects, noticeable
-for playing tightly in time. If A processes B and B processes A you get
-a feedback loop with that delay; every audio in has a limiter so it
-stays loud but not destructive.
+You describe an instrument in words, an AI chatbot writes it, and the
+host puts it on the relay. The files here already handle all the
+networking, so the chatbot only has to write the sound and the
+controls.
 
-Each stream is mono, 48 kHz, 16-bit: about 0.8 Mbit/s up to the relay,
-and the same again for each listener. A travel router handles a
-workshop group comfortably.
+### 1. Get the template
 
-Browsers slow down ordinary timers in a window that is hidden or
-covered and silent on its own laptop (for example "my speakers" off
-while the mixer is in front). The instruments here keep time with
-worker-driven timers from `dissonance.js`, which aren't slowed.
+Open the drone (`https://<host address>:8443/`) and view its source
+code: in Chrome press **Ctrl+U** (Windows) or **Cmd+Option+U** (Mac).
+Select all and copy it. You can also copy `public/index.html` from this
+repository.
 
-Backup plan if audio over the network misbehaves on the day: set
-**send audio** off everywhere, play through laptop speakers, and let
-effect instruments listen through the air.
+### 2. Ask the chatbot
 
-## Prototyping with an LLM
+Paste the template into the chat together with this prompt. Replace the
+part in square brackets with your idea:
 
-Participants give the LLM an instrument file (`index.html` is the
-smallest) and ask for a new one. Something like:
+```
+Here is an instrument for a networked improvisation. Make a new
+instrument that [describe your idea: what it sounds like, how it
+behaves, what the controls do].
 
-> Here is an instrument for a networked improvisation. It loads
-> osc-browser.min.js and dissonance.js; keep those two script tags and
-> the elements with ids status, name and log. Rewrite the
-> instrument so that it [idea]. Register every control a player might
-> want to share or have controlled with param(), as in the example;
-> the API is:
->
-> param(id, { input, min, max, kind, send, listen, onChange })
->   kind: "value" (default), "trigger", or "out" (send only)
->   send: "off" | "shared" | "personal" | "both" (default "shared")
->   listen: address to follow, "" for none (default "/shared/<id>")
->   onChange(v) runs for local moves and for incoming control.
-> Returns p with p.value, p.set(v) (apply and send), p.emit(v) (send
-> only). Include density, brightness and pulse.
-> For sound, create the context with audioContext() (not
-> new AudioContext()) and connect the final output to audioOut()
-> (not ctx.destination). To process another player's sound, use
-> audioIn("input", { anchor: "<id of an element>" }), which returns a
-> node to connect into the effect.
-> For anything timed (sequencers, arpeggios, auto-play), use
-> bgInterval(fn, ms) / bgTimeout(fn, ms) / clearBg(id) instead of
-> setInterval / setTimeout, so timing holds when the window is in the
-> background.
+Rules, so it works on the shared network:
+- Keep the two script tags that load osc-browser.min.js and
+  dissonance.js, and keep the elements with the ids status, name
+  and log.
+- Register every slider or button that other players might want to
+  share or control with param(), like the template does:
+    param(id, { input, min, max, kind, send, listen, onChange })
+    kind: "value" (default), "trigger" (a button), or "out" (send only)
+    send: "off" | "shared" | "personal" | "both" (default "shared")
+    listen: address to follow, "" for none (default "/shared/<id>")
+    onChange(v) runs for local moves and for incoming control.
+  It returns p with p.value, p.set(v) (apply and send), and
+  p.emit(v) (send only).
+- Include controls called density, brightness and pulse.
+- Create the audio context with audioContext() instead of
+  new AudioContext(), and connect the final output to audioOut()
+  instead of ctx.destination.
+- To process another player's sound (an effect), use
+  audioIn("input", { anchor: "<id of an element>" }). It returns an
+  audio node to connect into the effect.
+- For anything timed (sequencers, arpeggios, automatic playing) use
+  bgInterval(fn, ms), bgTimeout(fn, ms) and clearBg(id) instead of
+  setInterval and setTimeout, and schedule notes up to
+  ctx.currentTime + lookahead() ahead.
+- Return the complete HTML file.
+```
 
-Save the result as a new file in `public/` (e.g. `public/ana.html`)
-and open `https://<relay-ip>:8443/ana.html`. The routing strips appear
-by themselves.
+### 3. Save it
 
-## Included instruments
+Copy everything the chatbot returns into a plain text file and name it
+after yourself, for example `ana.html`. Use a plain text editor (Notepad
+on Windows, TextEdit on Mac set to Format → Make Plain Text), or save it
+straight from a code editor.
 
-- `index.html`: two detuned saws, the minimal template. Params:
-  density (detune), brightness, pitch, pulse.
-- `sequencer.html`: four-lane polymetric sequencer. Lanes of 5, 7, 11
-  and 13 steps (editable, 2 to 16) drift against each other. Density
-  sets how many hits each lane gets, brightness opens filters and
-  lengthens decays, pulse snaps every lane back to step 1. It sends
-  `pulse` whenever the 5 and 7 lanes line up (every 35 steps). The
-  pluck lane is tuned to a 24-ratio just intonation scale (3-, 5- and
-  7-limit, each switchable) with a pitch slider per step. Params:
-  density, brightness, pulse, tempo, swing, root, note (out).
+### 4. Put it on the relay
 
-- `melody.html`: monophonic melody voice in the same 24-tone just
-  intonation as the sequencer's pluck. Play it from the on-screen keys,
-  turn on **Auto phrase** for a walk through the scale that favours
-  simpler ratios and ends phrases on 1/1 (pulse makes it land), or
-  route another player's notes into **position** to double them;
-  **harmony** shifts the line by scale steps. Params: position,
-  harmony, glide, tempo, density, brightness, pulse, root, note (out).
+Send the file to the host (chat, AirDrop, USB stick). The host puts it
+in the relay's `public` folder. Then open
+`https://<host address>:8443/ana.html`. Your instrument's controls get
+their routing strips automatically, and it shows up for everyone else.
 
-Root and scale are shared by default on both the sequencer and the
-melody (`/shared/root`, `/shared/scale`), so they stay on the same
-tonic and the same set of ratios. Scale packs the three limit switches
-into one control, which is what lets a note position mean the same
-ratio on both. To have the melody play the sequencer's exact notes,
-set melody **position** to listen to the sequencer's note.
+### 5. Change it
 
-- `fx.html`: an effect. Pick whose sound it processes in its audio in
-  strip: ring modulator into a filtered feedback delay. Density sets
-  feedback, brightness the filters, pulse freezes the delay for two
-  seconds. Params: ringfreq, ring, time, density, brightness, pulse.
-- `mixer.html`: the room mixer for the PA laptop (see Audio routing).
+Tell the chatbot what to change ("make it darker", "add a second
+voice", "the pulse button does nothing"), save over your file, send it
+again, and reload the page.
 
-## Native tools
+If it doesn't work, paste the chatbot's code back to it along with what
+went wrong. The small black box at the bottom of the page shows the
+messages your instrument receives, which can help.
 
-Send OSC to the relay's IP on port **57121**. Send `/hello` once so the
-relay knows where to send messages back (it replies to the port you send from).
+---
 
-SuperCollider:
+## Running the relay (for hosts)
+
+The relay runs on one laptop (Mac, Windows or Linux). The first-time
+setup takes about 10 minutes and needs internet once. After that
+everything works offline.
+
+### First-time setup
+
+1. **Install Node.js** (the program that runs the relay): download the
+   "LTS" version from [nodejs.org](https://nodejs.org) and install it.
+2. **Get this project.** On the GitHub page, click the green **Code**
+   button, then **Download ZIP**, and unzip it somewhere you'll find
+   again. (If you use git: `git clone` the repository instead.)
+3. **Open a terminal in the project folder.**
+   - Mac: open **Terminal**, type `cd ` (with a space), drag the
+     project folder into the Terminal window, and press Return.
+   - Windows: open the project folder in File Explorer, click the
+     address bar, type `cmd` and press Enter.
+4. **Install the project's parts** by typing:
+   ```
+   npm install
+   ```
+   Warnings about funding or a newer npm version are harmless.
+
+### Every time
+
+1. Open a terminal in the project folder (as above) and type:
+   ```
+   npm start
+   ```
+2. The relay prints one or more addresses such as
+   `https://192.168.1.20:8443`. **Share the one for your Wi-Fi**: it
+   usually starts with `192.168.` or `10.`. If there are several and
+   you are unsure, on a Mac type `ipconfig getifaddr en0` in a second
+   Terminal window; that prints your Wi-Fi address. (Addresses starting
+   with `100.` are usually a VPN such as Tailscale and won't work for
+   others.)
+3. Open the address yourself, get past the certificate warning, and
+   start the mixer (`/mixer.html`) if you use a PA.
+4. The first time, your computer may ask whether to allow incoming
+   connections for "node". Click **Allow**.
+5. To stop the relay, press **Ctrl+C** in the terminal.
+
+Keep the terminal window open while playing; closing it stops the relay.
+
+**Run only one copy of the project.** If you unzip several versions,
+make sure the terminal is in the folder you mean to use. A relay
+started from an old folder serves old instruments.
+
+### Adding participants' instruments
+
+Put their `.html` file into the project's `public` folder. It is
+available straight away at `https://<your address>:8443/<file name>`;
+no restart needed.
+
+### The network in Vaasa
+
+The relay doesn't need the internet, but the laptops must be able to
+reach each other, and venue or university Wi-Fi (including eduroam)
+often blocks that. In order of reliability:
+
+1. **Bring a travel router** (any cheap one). Everyone, including the
+   relay laptop, joins its Wi-Fi. Nothing depends on the venue.
+2. **Use the relay laptop as a hotspot.** Fine for a handful of people;
+   most laptop hotspots allow about 8 devices.
+3. **Try the venue Wi-Fi.** Have a second person open the relay
+   address. If it doesn't load for them, the network is blocking it;
+   switch to option 1.
+
+Your address changes with the network, so read it again from the
+terminal after joining the Wi-Fi in Vaasa.
+
+**Backup plan** if sound over the network misbehaves: turn **send
+audio** off everywhere, let everyone play through their own speakers,
+and let effects listen through the air (a microphone input would need
+a small addition).
+
+---
+
+## Troubleshooting
+
+| Problem | What to try |
+|---|---|
+| The page doesn't load on another laptop | Is it on the same Wi-Fi? Did you type `https://` and `:8443`? On the host, allow "node" in the firewall (Mac: System Settings → Network → Firewall). Some venue networks block this entirely; see [the network in Vaasa](#the-network-in-vaasa). |
+| "Your connection is not private" | Expected. Click **Advanced**, then **Proceed**. |
+| No sound | Press **Start sound**. Check **my speakers** is on (or that the mixer is running), and that **Stop sound** isn't red. |
+| My channel doesn't appear on the mixer | Check **send audio** is on and you pressed Start sound. Channels appear within a couple of seconds. |
+| Someone's control isn't in my **in** menu | It appears once they have moved it (or started playing). Ask them to move it once. |
+| Two players are mixed up | Each page needs a different **My name**. |
+| Changes don't show up after an update | Hard-refresh the page: **Cmd+Shift+R** (Mac) or **Ctrl+Shift+R** (Windows). Check the relay is running from the right folder. |
+| Everything is out of tune with each other | Make sure **root** and **scale** have **in** set to `shared root` and `shared scale`. |
+
+---
+
+## Technical reference
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `server.js` | The relay: HTTPS server (8443, with 8080 redirecting), control hub, audio hub, OSC UDP bridge. |
+| `public/dissonance.js` | Shared library every instrument loads: network, routing strips, audio in and out, timers. |
+| `public/audio-worklet.js` | Audio capture, jitter buffer and resampling for streams. |
+| `public/*.html` | The instruments and the mixer. |
+| `cert/` | The relay's self-made certificate, created on first run (not in git). |
+
+### Addresses
+
+Controls travel as OSC messages with a single float from 0 to 1:
+
+| Address | Meaning |
+|---|---|
+| `/shared/<param>` | The room's common control (no argument for triggers). |
+| `/player/<name>/<param>` | One player's own control. |
+
+The relay remembers the latest value on every address and sends that
+snapshot to each page as it joins, so latecomers start in step.
+Restart the relay to clear it. Values received from others are never
+re-sent, so routing can't loop endlessly.
+
+### Instrument API (from `dissonance.js`)
+
+```
+param(id, { input, anchor, min, max, value, kind, send, listen, onChange })
+  -> p.value, p.set(v), p.emit(v)
+audioContext()                 shared AudioContext (48 kHz)
+audioOut({ anchor })           node to connect your final sound to
+audioIn(id, { anchor, source, bufferMs, strip })  -> node with another player's sound
+stopButton({ anchor })         Stop sound / Resume sound button
+onStreams(fn)                  called with the list of players sending audio
+bgInterval(fn, ms), bgTimeout(fn, ms), clearBg(id)   timers that keep time in the background
+lookahead()                    seconds ahead to schedule notes (grows when the page is starved)
+send(address, value), on(address, fn)   raw control messages, bypassing routing
+```
+
+### Audio streaming
+
+Streams are mono, 48 kHz, 16-bit, in packets of 512 samples: about
+0.8 Mbit/s from each sender and the same again for each listener, well
+within a travel router's capacity. A 60 ms jitter buffer on each
+receiver gives about 80 ms per hop. Packets pass between the audio
+worklets and a network worker directly, never through the page's main
+thread, and sequencers schedule further ahead when the browser slows a
+page down. That is what keeps covered and background windows playing.
+Every page also plays an inaudible 15 Hz tone to its own output so
+Chrome counts it as active.
+
+### Native tools (SuperCollider, Pd, Max, TouchDesigner, Python)
+
+Send OSC to the relay's address on UDP port **57121**. Send `/hello`
+once so the relay knows where to send messages back (it replies to the
+port you sent from).
 
 ```supercollider
 ~relay = NetAddr("192.168.1.20", 57121);
@@ -193,24 +340,8 @@ OSCdef(\bright, { |msg| msg[1].postln }, "/shared/brightness");
 ~relay.sendMsg("/shared/density", 0.4);
 ```
 
-## The network in Vaasa
+### Intervening in the traffic
 
-The relay does not need the internet. It needs laptops that can reach
-each other, and venue Wi-Fi (including eduroam) often blocks that
-("client isolation"). Plan in this order:
-
-1. **Bring a travel router** (any cheap one). Everyone joins its
-   network; the relay laptop joins too. Nothing depends on the venue.
-   This is the reliable option.
-2. **Relay laptop as a hotspot.** Works for a handful of people; most
-   laptop hotspots cap at about 8 clients.
-3. **Venue Wi-Fi.** Test on the day: two people open the relay page.
-   If the page doesn't load on the second device, the network isolates
-   clients and you move to option 1.
-
-A firewall prompt may appear on the relay laptop the first time; allow it.
-
-## Intervening in the traffic
-
-All messages pass through `relay()` in `server.js`. That is the one
-place to delay, drop, invert, or reroute messages for the whole room.
+Every control message passes through `relay()` in `server.js`: the one
+place to delay, drop, invert or reroute messages for the whole room.
+`QUIET=1 npm start` hides the message log in the terminal.
