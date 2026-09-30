@@ -120,10 +120,10 @@ const ratioText = (g, oct) => `${g.n}/${g.d}` + (oct > 0 ? "'".repeat(oct) : oct
 let ctx, o1, o2, filter, amp, lfo, lfoGain, delay;
 
 function initAudio() {
-  ctx = new AudioContext();
+  ctx = audioContext();
   const master = ctx.createDynamicsCompressor();
   const out = ctx.createGain(); out.gain.value = 0.7;
-  master.connect(out).connect(ctx.destination);
+  master.connect(out).connect(audioOut({ anchor: "auto" }));
 
   o1 = ctx.createOscillator(); o1.type = "triangle";
   o2 = ctx.createOscillator(); o2.type = "sawtooth";

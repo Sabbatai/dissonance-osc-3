@@ -37,6 +37,16 @@
    Values travel as 0..1 floats. Received values are never re-sent, so
    routing can't loop between players.
 
+   Audio (needs the https:// address):
+     audioContext()          the shared AudioContext; call it from your
+                             Start button instead of new AudioContext()
+     audioOut({ anchor })    returns a node: connect your final sound to
+                             it instead of ctx.destination. Its strip has
+                             "send audio" (to the room) and "my speakers"
+     audioIn(id, { anchor }) returns a node carrying another player's
+                             sound; its strip picks whose. Connect it
+                             into your effect. A limiter guards loops.
+
    Lower-level, bypassing routing:
      send(address, value)   on(address, fn)   on("*", fn)
    ===================================================================== */
@@ -50,7 +60,8 @@
   // ---------- connection ----------
   function on(address, fn) { (handlers[address] ||= []).push(fn); }
 
-  const port = new osc.WebSocketPort({ url: `ws://${location.host}`, metadata: true });
+  const WS = location.protocol === "https:" ? "wss" : "ws";
+  const port = new osc.WebSocketPort({ url: `${WS}://${location.host}`, metadata: true });
   port.on("ready", () => setStatus(true));
   port.on("close", () => { setStatus(false); setTimeout(() => location.reload(), 2000); });
   port.on("error", () => {});
@@ -252,6 +263,166 @@
     try { return JSON.parse(localStorage.getItem(key(id))) || {}; } catch (_) { return {}; }
   }
 
+  // ---------- audio routing ----------
+  // Audio streams travel through the relay's /audio hub as 48 kHz mono.
+  // Requires the https address (browsers only allow AudioWorklet there).
+  let actx = null, workletReady = null;
+
+  function audioContext() {
+    if (!actx) {
+      try { actx = new AudioContext({ sampleRate: 48000, latencyHint: "interactive" }); }
+      catch (_) { actx = new AudioContext(); }
+      workletReady = actx.audioWorklet
+        ? actx.audioWorklet.addModule("audio-worklet.js")
+        : Promise.reject(new Error("open the https:// address to route audio"));
+      workletReady.catch((e) => logLine("audio routing unavailable: " + e.message));
+    }
+    actx.resume();
+    return actx;
+  }
+
+  // everything connected to the returned node goes to my speakers and/or the room
+  let outBus = null;
+  function audioOut(o = {}) {
+    if (outBus) return outBus;
+    const ctx = audioContext();
+    const bus = ctx.createGain();
+    const speaker = ctx.createGain();
+    bus.connect(speaker).connect(ctx.destination);
+    const st = { net: loadA("out-net", true), speaker: loadA("out-speaker", true) };
+    speaker.gain.value = st.speaker ? 1 : 0;
+
+    let ws = null, sendNode = null, as = null;
+    const dot = mkDot();
+    function connect() {
+      if (!sendNode) return;
+      const want = st.net ? myName() : null;
+      if (want === as && ws) return;
+      if (ws) { ws.onclose = null; ws.close(); ws = null; }
+      as = want;
+      sendNode.port.postMessage({ on: !!want });
+      if (!want) return;
+      ws = new WebSocket(`${WS}://${location.host}/audio?pub=${encodeURIComponent(want)}`);
+      ws.onclose = () => { ws = null; setTimeout(connect, 1000); };
+    }
+    workletReady.then(() => {
+      sendNode = new AudioWorkletNode(ctx, "dissonance-send");
+      const sink = ctx.createGain(); sink.gain.value = 0;
+      bus.connect(sendNode); sendNode.connect(sink).connect(ctx.destination);   // keeps it running everywhere
+      let n = 0;
+      sendNode.port.onmessage = (e) => {
+        if (ws && ws.readyState === 1) { ws.send(e.data); if (++n % 8 === 0) pulseDot(dot); }
+      };
+      connect();
+    }).catch(() => {});
+    onNameChange(connect);
+
+    const strip = mkStrip(dot,
+      toggle("send audio", st.net, (v) => { st.net = v; saveA("out-net", v); connect(); }),
+      toggle("my speakers", st.speaker, (v) => { st.speaker = v; saveA("out-speaker", v); speaker.gain.setTargetAtTime(v ? 1 : 0, ctx.currentTime, 0.02); }));
+    placeStrip(o.anchor || "start", "audio out", strip);
+    outBus = bus;
+    return bus;
+  }
+
+  // a node carrying another player's sound (choose whose in its strip)
+  //   audioIn("input", { anchor, source, bufferMs, strip: false })
+  //   node.setSource(name)   switch source from code ("" for none)
+  const audioIns = [];
+  function audioIn(id = "audio", o = {}) {
+    const ctx = audioContext();
+    const out = ctx.createGain();
+    const limiter = ctx.createDynamicsCompressor();          // guards against feedback loops
+    limiter.threshold.value = -6; limiter.knee.value = 0; limiter.ratio.value = 20;
+    limiter.attack.value = 0.003; limiter.release.value = 0.1;
+    limiter.connect(out);
+
+    const A = { id, source: o.source ?? loadA("in-" + id, ""), gen: 0, ws: null, recv: null, strip: o.strip !== false };
+    A.dot = mkDot();
+    function subscribe() {
+      const g = ++A.gen;
+      if (A.ws) { A.ws.onclose = null; A.ws.close(); A.ws = null; }
+      if (A.recv) { A.recv.disconnect(); A.recv = null; }
+      if (!A.source) return;
+      workletReady.then(() => {
+        if (g !== A.gen) return;
+        A.recv = new AudioWorkletNode(ctx, "dissonance-receive", {
+          numberOfInputs: 0, outputChannelCount: [1], processorOptions: { bufferMs: o.bufferMs || 60 } });
+        A.recv.connect(limiter);
+        const ws = A.ws = new WebSocket(`${WS}://${location.host}/audio?sub=${encodeURIComponent(A.source)}`);
+        ws.binaryType = "arraybuffer";
+        let n = 0;
+        ws.onmessage = (e) => { if (A.recv) A.recv.port.postMessage(e.data, [e.data]); if (++n % 8 === 0) pulseDot(A.dot); };
+        ws.onclose = () => { if (g === A.gen) setTimeout(subscribe, 1000); };
+      }).catch(() => {});
+    }
+    out.setSource = (name) => { A.source = name || ""; if (A.sel) A.sel.value = A.source; subscribe(); };
+    out.source = () => A.source;
+
+    if (A.strip) {
+      A.sel = document.createElement("select");
+      A.sel.onchange = () => { saveA("in-" + id, A.sel.value); out.setSource(A.sel.value); A.sel.classList.toggle("on", !!A.sel.value); };
+      placeStrip(o.anchor, id, mkStrip(A.dot, A.sel));
+      fillAudioSel(A);
+    }
+    audioIns.push(A);
+    subscribe();
+    pollStreams();
+    return out;
+  }
+
+  // who is streaming: polled from the relay
+  let streams = [], polling = false;
+  const streamListeners = [];
+  function onStreams(fn) { streamListeners.push(fn); pollStreams(); if (streams.length) fn(streams); }
+  function pollStreams() {
+    if (polling) return;
+    polling = true;
+    const tick = () => fetch("/streams", { cache: "no-store" }).then((r) => r.json()).then((list) => {
+      if (JSON.stringify(list) !== JSON.stringify(streams)) {
+        streams = list;
+        audioIns.forEach(fillAudioSel);
+        streamListeners.forEach((fn) => fn(streams));
+      }
+    }).catch(() => {}).finally(() => setTimeout(tick, 2000));
+    tick();
+  }
+  function fillAudioSel(A) {
+    if (!A.sel) return;
+    const names = streams.filter((n) => n !== myName());
+    if (A.source && !names.includes(A.source)) names.push(A.source);
+    A.sel.innerHTML = "";
+    A.sel.add(new Option("audio in: none", ""));
+    for (const n of names) A.sel.add(new Option("audio in: " + n, n));
+    A.sel.value = A.source;
+    A.sel.classList.toggle("on", !!A.source);
+  }
+
+  // ---------- small strip helpers ----------
+  function mkDot() { const d = document.createElement("span"); d.className = "rt-dot"; return d; }
+  function pulseDot(d) { d.classList.add("hit"); clearTimeout(d._t); d._t = setTimeout(() => d.classList.remove("hit"), 150); }
+  function mkStrip(...els) { injectStyle(); const s = document.createElement("span"); s.className = "rt"; s.append(...els); return s; }
+  function toggle(label, value, fn) {
+    const sel = document.createElement("select");
+    sel.add(new Option(label + ": on", "1")); sel.add(new Option(label + ": off", "0"));
+    sel.value = value ? "1" : "0";
+    sel.classList.toggle("on", value);
+    sel.onchange = () => { const v = sel.value === "1"; sel.classList.toggle("on", v); fn(v); };
+    return sel;
+  }
+  function placeStrip(anchor, label, strip) {
+    const a = typeof anchor === "string" ? $id(anchor) : anchor;
+    if (a) { a.after(strip); return; }
+    let box = $id("routing");
+    if (!box) { box = document.createElement("div"); box.id = "routing"; const log = $id("log"); log ? log.before(box) : document.body.append(box); }
+    const row = document.createElement("div"); row.className = "rt-row";
+    row.innerHTML = `<span class="rt-name">${label}</span>`;
+    row.append(strip); box.append(row);
+  }
+  function onNameChange(fn) { const el = $id("name"); if (el) el.addEventListener("change", fn); }
+  function saveA(k, v) { try { localStorage.setItem(key("audio-" + k), JSON.stringify(v)); } catch (_) {} }
+  function loadA(k, d) { try { const v = JSON.parse(localStorage.getItem(key("audio-" + k))); return v ?? d; } catch (_) { return d; } }
+
   // ---------- status + log (created if the page doesn't have them) ----------
   function setStatus(ok) {
     let el = $id("status");
@@ -284,5 +455,6 @@
     document.head.append(s);
   }
 
-  Object.assign(window, { param, send, on, logLine, setStatus });
+  onNameChange(() => params.forEach(fillListen));
+  Object.assign(window, { param, send, on, logLine, setStatus, audioContext, audioOut, audioIn, onStreams });
 })();

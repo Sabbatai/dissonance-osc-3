@@ -334,10 +334,10 @@ function metal(t, step) {
 // ---------- start / stop ----------
 $("start").onclick = () => {
   if (!ctx) {
-    ctx = new AudioContext();
+    ctx = audioContext();
     master = ctx.createDynamicsCompressor();
     const out = ctx.createGain(); out.gain.value = 0.6;
-    master.connect(out).connect(ctx.destination);
+    master.connect(out).connect(audioOut({ anchor: "align" }));
     noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 0.2, ctx.sampleRate);
     const d = noiseBuf.getChannelData(0);
     for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
@@ -356,7 +356,7 @@ const brightnessP = param("brightness", { input: "brightness", onChange: (v) => 
 const pulseP      = param("pulse",      { input: "pulse", kind: "trigger", onChange: () => { pendingReset = true; } });
 const tempoP      = param("tempo",      { input: "tempo", send: "personal", listen: "" });
 const swingP      = param("swing",      { input: "swing", send: "personal", listen: "" });
-const rootP       = param("root",       { input: "root",  anchor: "rootHz", send: "personal", listen: "",
+const rootP       = param("root",       { input: "root",  anchor: "rootHz", send: "shared", listen: "/shared/root",
   onChange: (v) => { $("rootHz").textContent = Math.round(v) + " Hz"; refreshPitches(); } });
 const noteP       = param("note",       { kind: "out", send: "personal" });
 

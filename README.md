@@ -5,22 +5,36 @@ from SuperCollider / Pd / Max / TouchDesigner / Python. Every message
 anyone sends reaches everyone else.
 
 ```
- browser ──┐                       ┌── browser
- browser ──┼── WebSocket ─ relay ─ UDP OSC ──┼── SuperCollider / Pd / Max
- browser ──┘      (port 8080)       (57121 in)  └── ...
+ browser ──┐                                   ┌── browser
+ browser ──┼── WebSocket (control + audio) ─ relay ─ UDP OSC ──┼── SuperCollider / Pd / Max
+ browser ──┘          (https port 8443)          (57121 in)   └── ...
 ```
 
 ## Run it
 
-Needs Node.js 18 or newer. `node_modules` is included, so this works offline.
+Needs Node.js 18 or newer. The first time, install the two dependencies
+(needs internet once; after that it all runs offline):
 
 ```
-node server.js
+npm install
 ```
 
-It prints the address to share, e.g. `http://192.168.1.20:8080`.
+Then start the relay:
+
+```
+npm start
+```
+
+It prints the address to share, e.g. `https://192.168.1.20:8443`.
 Participants open that in a browser, press **Start sound**, and move sliders.
 Open it in two tabs on one laptop to test alone.
+
+**The certificate warning.** Browsers only allow audio streaming on
+secure (https) pages, so the relay makes its own certificate the first
+time it runs (saved in `cert/`, not in git). Every browser shows a
+warning once: Chrome "Advanced, then Proceed", Firefox "Advanced, then
+Accept the risk", Safari "Show details, then visit this website".
+The old `http://...:8080` address redirects to https.
 
 `QUIET=1 node server.js` hides the message log.
 
@@ -41,13 +55,13 @@ Every instrument loads `public/dissonance.js`, which handles the
 network and puts a small routing strip right next to each control:
 
 - **dot:** lights when someone else is moving this control
-- **out:** off, shared (`/shared/<param>`), mine
-  (`/player/<my name>/<param>`), or both
 - **in:** none, or any address heard on the network. New addresses
   (another player's pitch, a sequencer's notes) are added as soon as
   they arrive, so your root can follow someone's pitch, your density
   can follow someone's melody, and so on.
 - **inv:** flip incoming values; only appears while listening
+- **out:** off, shared (`/shared/<param>`), mine
+  (`/player/<my name>/<param>`), or both
 
 Active choices are bright, inactive ones dimmed. Parameters without a
 control of their own (like the sequencer's `note` output) get their
@@ -58,6 +72,36 @@ others are never re-sent, so two instruments listening to each other
 can't feed back endlessly.
 
 Give each player a distinct name; personal addresses use it.
+
+## Audio routing
+
+Instruments can send their sound into the room and take in each other's
+sound, all through the relay.
+
+- Every instrument has an **audio out** strip by its Start button:
+  **send audio** (stream to the room) and **my speakers** (play on
+  this laptop).
+- An effect takes another player's sound with an **audio in** strip:
+  pick whose sound to process from the menu.
+- `mixer.html` runs on the laptop connected to the PA. Every
+  instrument sending audio gets a channel with fader, mute, solo and
+  meter, plus a master fader with a limiter. When the PA is in use,
+  players set **my speakers** to off.
+
+Delay is about 80 ms per hop on a quiet network (a 60 ms buffer
+absorbs Wi-Fi jitter). So instrument -> effect -> mixer is about
+160 ms behind the player: fine for textures and effects, noticeable
+for playing tightly in time. If A processes B and B processes A you get
+a feedback loop with that delay; every audio in has a limiter so it
+stays loud but not destructive.
+
+Each stream is mono, 48 kHz, 16-bit: about 0.8 Mbit/s up to the relay,
+and the same again for each listener. A travel router handles a
+workshop group comfortably.
+
+Backup plan if audio over the network misbehaves on the day: set
+**send audio** off everywhere, play through laptop speakers, and let
+effect instruments listen through the air.
 
 ## Prototyping with an LLM
 
@@ -78,9 +122,14 @@ smallest) and ask for a new one. Something like:
 >   onChange(v) runs for local moves and for incoming control.
 > Returns p with p.value, p.set(v) (apply and send), p.emit(v) (send
 > only). Include density, brightness and pulse.
+> For sound, create the context with audioContext() (not
+> new AudioContext()) and connect the final output to audioOut()
+> (not ctx.destination). To process another player's sound, use
+> audioIn("input", { anchor: "<id of an element>" }), which returns a
+> node to connect into the effect.
 
 Save the result as a new file in `public/` (e.g. `public/ana.html`)
-and open `http://<relay-ip>:8080/ana.html`. The routing strips appear
+and open `https://<relay-ip>:8443/ana.html`. The routing strips appear
 by themselves.
 
 ## Included instruments
@@ -95,6 +144,23 @@ by themselves.
   pluck lane is tuned to a 24-ratio just intonation scale (3-, 5- and
   7-limit, each switchable) with a pitch slider per step. Params:
   density, brightness, pulse, tempo, swing, root, note (out).
+
+- `melody.html`: monophonic melody voice in the same 24-tone just
+  intonation as the sequencer's pluck. Play it from the on-screen keys,
+  turn on **Auto phrase** for a walk through the scale that favours
+  simpler ratios and ends phrases on 1/1 (pulse makes it land), or
+  route another player's notes into **position** to double them;
+  **harmony** shifts the line by scale steps. Params: position,
+  harmony, glide, tempo, density, brightness, pulse, root, note (out).
+
+Root is shared by default on both the sequencer and the melody
+(`/shared/root`), so they stay on the same tonic.
+
+- `fx.html`: an effect. Pick whose sound it processes in its audio in
+  strip: ring modulator into a filtered feedback delay. Density sets
+  feedback, brightness the filters, pulse freezes the delay for two
+  seconds. Params: ringfreq, ring, time, density, brightness, pulse.
+- `mixer.html`: the room mixer for the PA laptop (see Audio routing).
 
 ## Native tools
 

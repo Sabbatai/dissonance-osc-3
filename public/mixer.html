@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Room Mixer</title>
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; max-width: 960px; margin: 24px auto; padding: 0 16px; background: #111; color: #eee; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .status { font-size: 13px; color: #999; margin-bottom: 16px; }
+  .status.on { color: #6c6; }
+  button { font: inherit; padding: 8px 14px; margin: 8px 8px 0 0; background: #333; color: #eee; border: 1px solid #555; border-radius: 4px; cursor: pointer; }
+  .hint { font-size: 13px; color: #888; margin: 8px 0 16px; }
+  #log { margin-top: 20px; font: 12px/1.3 ui-monospace, monospace; color: #8a8; height: 100px; overflow: auto; background: #000; padding: 8px; border-radius: 4px; white-space: pre; }
+
+  #desk { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 8px; }
+  .ch { flex: none; width: 84px; background: #1a1a1a; border: 1px solid #2c2c2c; border-radius: 6px; padding: 8px 6px;
+        display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .ch.master { background: #202020; border-color: #444; margin-left: 12px; }
+  .ch.offline { opacity: 0.4; }
+  .ch .nm { font-size: 13px; width: 100%; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ch .body { display: flex; gap: 6px; align-items: stretch; height: 180px; }
+  .ch input[type=range] { writing-mode: vertical-lr; direction: rtl; width: 22px; height: 180px; margin: 0; }
+  .meter { width: 10px; background: #000; border-radius: 2px; position: relative; overflow: hidden; }
+  .meter i { position: absolute; left: 0; right: 0; bottom: 0; background: linear-gradient(to top, #4a4 0%, #4a4 70%, #dc4 85%, #e55 100%); background-size: 100% 180px; background-position: bottom; }
+  .ch .db { font: 11px ui-monospace, monospace; color: #888; }
+  .ch .btns { display: flex; gap: 4px; }
+  .ch .btns button { margin: 0; padding: 3px 7px; font-size: 12px; }
+  .ch .btns button.m.active { background: #a33; border-color: #d55; }
+  .ch .btns button.s.active { background: #aa3; border-color: #dd5; color: #111; }
+  .empty { color: #666; font-size: 14px; padding: 20px 0; }
+</style>
+</head>
+<body>
+<h1>Room Mixer</h1>
+<div id="status" class="status">not connected</div>
+<button id="start">Start mixer</button>
+<div class="hint">Run this on the laptop connected to the PA. Every instrument that is sending audio gets a channel.
+Players should set "my speakers" to off so the room only hears the PA.</div>
+
+<div id="desk"><div class="empty" id="empty">Press Start mixer.</div></div>
+<div id="log"></div>
+
+<script src="osc-browser.min.js"></script>
+<script src="dissonance.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+let ctx, masterIn, masterGain, masterAn;
+const channels = new Map();   // name -> {el, fader, an, gain, mute, solo}
+
+$("start").onclick = () => {
+  if (ctx) return;
+  ctx = audioContext();
+  masterIn = ctx.createGain();
+  masterGain = ctx.createGain();
+  const limiter = ctx.createDynamicsCompressor();
+  limiter.threshold.value = -3; limiter.knee.value = 0; limiter.ratio.value = 20; limiter.attack.value = 0.002; limiter.release.value = 0.1;
+  masterAn = ctx.createAnalyser(); masterAn.fftSize = 1024;
+  masterIn.connect(masterGain).connect(limiter).connect(masterAn).connect(ctx.destination);
+  $("start").textContent = "Mixer running";
+  $("empty").textContent = "Waiting for instruments to send audio...";
+  $("desk").append(makeStrip("master", { master: true }));
+  onStreams(update);
+  requestAnimationFrame(meters);
+};
+
+function update(list) {
+  if (!ctx) return;
+  for (const name of list) if (!channels.has(name)) addChannel(name);
+  for (const [name, ch] of channels) ch.el.classList.toggle("offline", !list.includes(name));
+  $("empty").style.display = channels.size ? "none" : "";
+}
+
+function addChannel(name) {
+  const src = audioIn("ch-" + name, { source: name, strip: false });
+  const gain = ctx.createGain();
+  const an = ctx.createAnalyser(); an.fftSize = 1024;
+  src.connect(gain).connect(an).connect(masterIn);
+  const ch = { gain, an, mute: false, solo: false, level: 0.8 };
+  ch.el = makeStrip(name, { ch });
+  channels.set(name, ch);
+  $("desk").insertBefore(ch.el, $("desk").querySelector(".master"));
+  applyGains();
+}
+
+function makeStrip(name, { ch, master }) {
+  const el = document.createElement("div");
+  el.className = "ch" + (master ? " master" : "");
+  el.innerHTML = `<div class="nm" title="${name}">${name}</div>
+    <div class="body"><input type="range" min="0" max="1.25" step="0.001" value="${master ? 1 : 0.8}"><div class="meter"><i></i></div></div>
+    <div class="db">-inf</div>
+    <div class="btns">${master ? "" : '<button class="m">M</button><button class="s">S</button>'}</div>`;
+  const fader = el.querySelector("input");
+  const target = master ? { an: masterAn } : ch;
+  target.bar = el.querySelector(".meter i");
+  target.db = el.querySelector(".db");
+  if (master) { fader.oninput = () => masterGain.gain.setTargetAtTime(+fader.value, ctx.currentTime, 0.02); window._master = target; }
+  else {
+    fader.oninput = () => { ch.level = +fader.value; applyGains(); };
+    el.querySelector(".m").onclick = (e) => { ch.mute = !ch.mute; e.target.classList.toggle("active", ch.mute); applyGains(); };
+    el.querySelector(".s").onclick = (e) => { ch.solo = !ch.solo; e.target.classList.toggle("active", ch.solo); applyGains(); };
+  }
+  return el;
+}
+
+function applyGains() {
+  const anySolo = [...channels.values()].some((c) => c.solo);
+  for (const c of channels.values()) {
+    const on = !c.mute && (!anySolo || c.solo);
+    c.gain.gain.setTargetAtTime(on ? c.level : 0, ctx.currentTime, 0.02);
+  }
+}
+
+const buf = new Float32Array(1024);
+function level(t) {
+  t.an.getFloatTimeDomainData(buf);
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+  const db = 20 * Math.log10(Math.sqrt(sum / buf.length) + 1e-9);
+  t.bar.style.height = Math.max(0, Math.min(100, (db + 60) / 60 * 100)) + "%";
+  t.db.textContent = db < -59 ? "-inf" : db.toFixed(0) + " dB";
+}
+function meters() {
+  for (const c of channels.values()) level(c);
+  if (window._master) level(window._master);
+  requestAnimationFrame(meters);
+}
+</script>
+</body>
+</html>

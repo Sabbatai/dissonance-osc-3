@@ -1,16 +1,18 @@
 {
   "name": "dissonance-osc",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "private": true,
+  "description": "OSC relay and browser instruments for networked improvisation (Dissonance Workshop, NordiCHI)",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "osc": "^2.4.5",
+    "selfsigned": "^5.5.0",
     "ws": "^8.22.0"
+  },
+  "overrides": {
+    "ws": "$ws"
   }
 }

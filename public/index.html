@@ -44,12 +44,12 @@ let ctx, osc1, osc2, filter, amp;
 
 document.getElementById("start").onclick = () => {
   if (ctx) return;
-  ctx = new AudioContext();
+  ctx = audioContext();
   filter = ctx.createBiquadFilter(); filter.type = "lowpass";
   amp = ctx.createGain(); amp.gain.value = 0.15;
   osc1 = ctx.createOscillator(); osc1.type = "sawtooth";
   osc2 = ctx.createOscillator(); osc2.type = "sawtooth";
-  osc1.connect(filter); osc2.connect(filter); filter.connect(amp); amp.connect(ctx.destination);
+  osc1.connect(filter); osc2.connect(filter); filter.connect(amp); amp.connect(audioOut());
   osc1.start(); osc2.start();
   update();
 };

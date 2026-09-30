@@ -1,83 +1,163 @@
 // Dissonance relay: one laptop runs this, everyone else connects to it.
 //
-//  - Serves the browser instruments in ./public over HTTP (port 8080)
-//  - WebSocket hub on the same port: every OSC message a browser sends
-//    is rebroadcast to all other browsers
-//  - UDP bridge (port 57121 in, 57120 out): native tools (SuperCollider,
-//    Pd, Max, TouchDesigner, Python) join the same conversation
+//  - Serves the instruments in ./public over HTTPS (port 8443). Browsers
+//    only allow audio streaming on secure pages, so the relay makes its
+//    own certificate (saved in ./cert). Everyone clicks through a browser
+//    warning once. Plain http://...:8080 redirects to https.
+//  - Control hub (WebSocket "/"): every OSC message a browser sends is
+//    rebroadcast to everyone else.
+//  - Audio hub (WebSocket "/audio"): instruments publish their sound
+//    under their player name; anyone can subscribe to anyone.
+//    GET /streams lists who is streaming.
+//  - UDP bridge (57121 in): native tools (SuperCollider, Pd, Max,
+//    TouchDesigner, Python) join the control conversation.
 //
-// Run:  node server.js
-// Then open http://<this-laptop-ip>:8080 on any device on the network.
+// Run:  npm start   (or: node server.js)
 
 const http = require("http");
+const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const osc = require("osc");
+const selfsigned = require("selfsigned");
 const { WebSocketServer } = require("ws");
 
 const HTTP_PORT = 8080;
-const UDP_IN = 57121;      // native tools send here
-const UDP_OUT = 57120;     // native tools listen here (SuperCollider default)
+const HTTPS_PORT = 8443;
+const UDP_IN = 57121;
+const PUBLIC = path.join(__dirname, "public");
+const CERT_DIR = path.join(__dirname, "cert");
 
-// Native clients register by sending /hello from their UDP port.
-// Anyone who has ever sent us something also gets messages back.
 const udpPeers = new Map(); // "ip:port" -> {address, port}
 
-// ---------- HTTP: serve ./public ----------
-const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };
-const server = http.createServer((req, res) => {
-  const file = path.join(__dirname, "public", req.url === "/" ? "index.html" : req.url);
-  if (!file.startsWith(path.join(__dirname, "public"))) { res.writeHead(403); return res.end(); }
-  fs.readFile(file, (err, data) => {
-    if (err) { res.writeHead(404); return res.end("not found"); }
-    res.writeHead(200, { "Content-Type": types[path.extname(file)] || "application/octet-stream" });
-    res.end(data);
+main().catch((e) => { console.error(e); process.exit(1); });
+
+async function main() {
+  const creds = await certificate();
+
+  // ---------- static files ----------
+  const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json" };
+  function serve(req, res) {
+    const url = new URL(req.url, "https://x");
+    if (url.pathname === "/streams") {
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      return res.end(JSON.stringify([...publishers.keys()].sort()));
+    }
+    const file = path.join(PUBLIC, url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname));
+    if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); }
+    fs.readFile(file, (err, data) => {
+      if (err) { res.writeHead(404); return res.end("not found"); }
+      res.writeHead(200, { "Content-Type": types[path.extname(file)] || "application/octet-stream", "Cache-Control": "no-cache" });
+      res.end(data);
+    });
+  }
+  const server = https.createServer(creds, serve);
+
+  // plain http: send people to the https address
+  http.createServer((req, res) => {
+    const host = (req.headers.host || "localhost").replace(/:\d+$/, "");
+    res.writeHead(301, { Location: `https://${host}:${HTTPS_PORT}${req.url}` });
+    res.end();
+  }).listen(HTTP_PORT, "0.0.0.0");
+
+  // ---------- two WebSocket hubs on the same port ----------
+  const controlWss = new WebSocketServer({ noServer: true });
+  const audioWss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+  server.on("upgrade", (req, socket, head) => {
+    const { pathname } = new URL(req.url, "https://x");
+    const wss = pathname === "/audio" ? audioWss : controlWss;
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
   });
-});
 
-// ---------- WebSocket hub ----------
-const wss = new WebSocketServer({ server });
-const sockets = new Set();
+  // ---------- control hub (OSC over WebSocket) ----------
+  const sockets = new Set();
+  controlWss.on("connection", (raw, req) => {
+    const port = new osc.WebSocketPort({ socket: raw, metadata: true });
+    sockets.add(port);
+    log(`browser joined (${req.socket.remoteAddress}), ${sockets.size} connected`);
+    port.on("message", (msg) => relay(msg, port));
+    port.on("close", () => { sockets.delete(port); log(`browser left, ${sockets.size} connected`); });
+    port.on("error", () => {});
+  });
 
-wss.on("connection", (raw, req) => {
-  const port = new osc.WebSocketPort({ socket: raw, metadata: true });
-  sockets.add(port);
-  log(`browser joined (${req.socket.remoteAddress}), ${sockets.size} connected`);
+  // ---------- audio hub ----------
+  // /audio?pub=<name>  send binary audio packets
+  // /audio?sub=<name>  receive that player's packets
+  // Slow receivers get packets dropped rather than delayed.
+  const publishers = new Map();   // name -> ws
+  const subscribers = new Map();  // name -> Set<ws>
+  audioWss.on("connection", (ws, req) => {
+    const q = new URL(req.url, "https://x").searchParams;
+    const pub = q.get("pub"), sub = q.get("sub");
+    if (pub) {
+      publishers.set(pub, ws);
+      log(`audio: ${pub} streaming`);
+      ws.on("message", (data) => {
+        for (const s of subscribers.get(pub) || []) {
+          if (s.readyState === 1 && s.bufferedAmount < 64 * 1024) s.send(data, { binary: true });
+        }
+      });
+      ws.on("close", () => { if (publishers.get(pub) === ws) { publishers.delete(pub); log(`audio: ${pub} stopped`); } });
+    } else if (sub) {
+      if (!subscribers.has(sub)) subscribers.set(sub, new Set());
+      subscribers.get(sub).add(ws);
+      ws.on("close", () => subscribers.get(sub)?.delete(ws));
+    } else ws.close();
+    ws.on("error", () => {});
+  });
 
-  port.on("message", (msg) => relay(msg, port));
-  port.on("close", () => { sockets.delete(port); log(`browser left, ${sockets.size} connected`); });
-  port.on("error", () => {});
-});
+  // ---------- UDP bridge ----------
+  const udp = new osc.UDPPort({ localAddress: "0.0.0.0", localPort: UDP_IN, metadata: true });
+  udp.on("message", (msg, _time, info) => {
+    const key = `${info.address}:${info.port}`;
+    if (!udpPeers.has(key)) { udpPeers.set(key, { address: info.address, port: info.port }); log(`native peer ${key}`); }
+    if (msg.address === "/hello") return;
+    relay(msg, null, key);
+  });
+  udp.on("error", (e) => log("udp error: " + e.message));
+  udp.open();
 
-// ---------- UDP bridge ----------
-const udp = new osc.UDPPort({ localAddress: "0.0.0.0", localPort: UDP_IN, metadata: true });
-udp.on("message", (msg, _time, info) => {
-  const key = `${info.address}:${info.port}`;
-  if (!udpPeers.has(key)) { udpPeers.set(key, { address: info.address, port: info.port }); log(`native peer ${key}`); }
-  if (msg.address === "/hello") return;
-  relay(msg, null, key);
-});
-udp.on("error", (e) => log("udp error: " + e.message));
-udp.open();
+  // ---------- the control relay ----------
+  // One place to intervene in the room's control traffic: delay it,
+  // drop it, invert values, remap addresses...
+  function relay(msg, fromSocket, fromUdpKey) {
+    for (const s of sockets) if (s !== fromSocket) { try { s.send(msg); } catch (_) {} }
+    for (const [key, p] of udpPeers) if (key !== fromUdpKey) udp.send(msg, p.address, p.port);
+    if (process.env.QUIET !== "1") log(fmt(msg));
+  }
 
-// ---------- the relay itself ----------
-// This function is also where a workshop could intervene in the
-// traffic: delay it, drop it, invert values, remap addresses...
-function relay(msg, fromSocket, fromUdpKey) {
-  for (const s of sockets) if (s !== fromSocket) safeSend(s, msg);
-  for (const [key, p] of udpPeers) if (key !== fromUdpKey) udp.send(msg, p.address, p.port);
-  if (process.env.QUIET !== "1") log(fmt(msg));
+  server.listen(HTTPS_PORT, "0.0.0.0", () => {
+    console.log("\nDissonance relay running");
+    for (const ip of localIPs()) console.log(`  open:  https://${ip}:${HTTPS_PORT}`);
+    console.log(`  (the browser will warn about the certificate once: choose Advanced, then proceed)`);
+    console.log(`  native OSC: send to port ${UDP_IN} (send /hello once to subscribe)\n`);
+  });
 }
 
-function safeSend(port, msg) { try { port.send(msg); } catch (_) {} }
-function fmt(m) { return `${m.address} ${(m.args || []).map((a) => (typeof a.value === "number" ? a.value.toFixed(3) : a.value)).join(" ")}`; }
-function log(s) { console.log(new Date().toISOString().slice(11, 19), s); }
+// A self-made certificate, created once and reused so browsers only warn once.
+async function certificate() {
+  const keyFile = path.join(CERT_DIR, "key.pem"), certFile = path.join(CERT_DIR, "cert.pem");
+  if (fs.existsSync(keyFile) && fs.existsSync(certFile)) {
+    return { key: fs.readFileSync(keyFile), cert: fs.readFileSync(certFile) };
+  }
+  const notAfter = new Date(); notAfter.setDate(notAfter.getDate() + 365);
+  const altNames = [{ type: 2, value: "localhost" }, ...localIPs().concat("127.0.0.1").map((ip) => ({ type: 7, ip }))];
+  const pems = await selfsigned.generate([{ name: "commonName", value: "dissonance relay" }], {
+    keySize: 2048, algorithm: "sha256", notAfterDate: notAfter,
+    extensions: [{ name: "subjectAltName", altNames }],
+  });
+  fs.mkdirSync(CERT_DIR, { recursive: true });
+  fs.writeFileSync(keyFile, pems.private);
+  fs.writeFileSync(certFile, pems.cert);
+  console.log("made a new certificate in ./cert");
+  return { key: pems.private, cert: pems.cert };
+}
 
-server.listen(HTTP_PORT, "0.0.0.0", () => {
+function localIPs() {
   const ips = Object.values(os.networkInterfaces()).flat()
     .filter((i) => i && i.family === "IPv4" && !i.internal).map((i) => i.address);
-  console.log("\nDissonance relay running");
-  for (const ip of ips.length ? ips : ["localhost"]) console.log(`  browsers:  http://${ip}:${HTTP_PORT}`);
-  console.log(`  native OSC: send to port ${UDP_IN} (send /hello once to subscribe)\n`);
-});
+  return ips.length ? ips : ["localhost"];
+}
+function fmt(m) { return `${m.address} ${(m.args || []).map((a) => (typeof a.value === "number" ? a.value.toFixed(3) : a.value)).join(" ")}`; }
+function log(s) { console.log(new Date().toISOString().slice(11, 19), s); }
