@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Post an instrument — Dissonance</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 760px; margin: 28px auto; padding: 0 18px; background:#111; color:#eee; }
+  h1 { font-size: 24px; margin-bottom: 6px; }
+  .lede, .hint { color:#aaa; }
+  label { display:block; margin:18px 0 5px; font-weight:600; }
+  input, textarea, button { font:inherit; box-sizing:border-box; }
+  input[type=text], textarea { width:100%; background:#1d1d1d; color:#eee; border:1px solid #555; border-radius:6px; padding:10px; }
+  textarea { min-height:260px; font:13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  input[type=file] { margin:4px 0 8px; }
+  button { margin-top:18px; padding:10px 16px; background:#333; color:#fff; border:1px solid #666; border-radius:6px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  #status { margin-top:14px; min-height:24px; }
+  #status.good { color:#8d8; }
+  #status.bad { color:#f88; }
+  .nav { margin-bottom:18px; }
+  .nav a { color:#9cf; margin-right:16px; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="/">Home</a><a href="/gallery.html">Instrument gallery</a></div>
+<h1>Post an instrument</h1>
+<p class="lede">Share a single-file HTML instrument with everyone connected to this Dissonance server.</p>
+
+<label for="title">Instrument name</label>
+<input id="title" type="text" maxlength="80" placeholder="e.g. Wobbly Bells">
+
+<label for="author">Your name <span class="hint">(optional)</span></label>
+<input id="author" type="text" maxlength="80" placeholder="e.g. Alex">
+
+<label for="file">Choose the HTML file your LLM made</label>
+<input id="file" type="file" accept=".html,text/html">
+<p class="hint">Or paste the complete HTML below. Choosing a file will fill the box for you.</p>
+
+<label for="html">Instrument HTML</label>
+<textarea id="html" spellcheck="false" placeholder="<!doctype html>\n<html>\n...\n</html>"></textarea>
+
+<button id="post">Post instrument</button>
+<div id="status"></div>
+
+<script>
+const file = document.getElementById('file');
+const html = document.getElementById('html');
+const title = document.getElementById('title');
+const author = document.getElementById('author');
+const post = document.getElementById('post');
+const status = document.getElementById('status');
+
+file.addEventListener('change', async () => {
+  const f = file.files[0];
+  if (!f) return;
+  html.value = await f.text();
+  if (!title.value.trim()) title.value = f.name.replace(/\.html?$/i, '').replace(/[-_]+/g, ' ');
+});
+
+post.addEventListener('click', async () => {
+  status.className = '';
+  status.textContent = '';
+  const payload = { title: title.value.trim(), author: author.value.trim(), html: html.value };
+  if (!payload.title || !payload.html.trim()) {
+    status.className = 'bad';
+    status.textContent = 'Add an instrument name and choose or paste an HTML file.';
+    return;
+  }
+  post.disabled = true;
+  post.textContent = 'Posting…';
+  try {
+    const r = await fetch('/api/instruments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || 'upload failed');
+    status.className = 'good';
+    status.innerHTML = `Posted! <a style="color:#9cf" href="${data.url}" target="_blank" rel="noopener">Open instrument</a> · <a style="color:#9cf" href="/gallery.html">See gallery</a>`;
+  } catch (e) {
+    status.className = 'bad';
+    status.textContent = e.message;
+  } finally {
+    post.disabled = false;
+    post.textContent = 'Post instrument';
+  }
+});
+</script>
+</body>
+</html>

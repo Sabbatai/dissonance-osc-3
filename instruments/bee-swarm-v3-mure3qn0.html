@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<base href="/">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bee Swarm</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 15px/1.4 system-ui, sans-serif; max-width: 650px; margin: 24px auto; padding: 0 16px 40px; background:#111; color:#eee; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:#999; margin:0 0 18px; }
+  button, input { font:inherit; }
+  button { padding:8px 14px; margin:4px 8px 4px 0; background:#292929; color:#eee; border:1px solid #555; border-radius:5px; cursor:pointer; }
+  label { display:block; margin:14px 0 3px; }
+  input[type=range] { width:100%; }
+  .panel { border:1px solid #333; border-radius:8px; padding:12px 14px; margin:14px 0; background:#161616; }
+  .val { color:#aaa; font-size:13px; margin-left:6px; }
+  .swarm-readout { font:13px ui-monospace, SFMono-Regular, Menlo, monospace; color:#c9b86a; margin-top:10px; }
+  .hint { color:#999; font-size:13px; }
+</style>
+</head>
+<body>
+<h1>Bee Swarm</h1>
+<p class="sub">A continuous controllable cloud of synthetic buzzing insects. Swarm size changes perceived density without multiplying DSP cost.</p>
+
+<div class="panel">
+  <button id="start">Start swarm</button>
+  <p class="hint">The swarm is synthesized continuously. Swarm size changes density, while chaos changes movement and roughness without gating the buzz.</p>
+</div>
+
+<div class="panel">
+  <strong>Swarm</strong>
+
+  <label>Number of bees <span class="val" id="countVal"></span>
+    <input id="count" type="range" min="1" max="80" step="1" value="24">
+  </label>
+
+  <label>Base fundamental <span class="val" id="fundamentalVal"></span>
+    <input id="fundamental" type="range" min="55" max="500" step="1" value="165">
+  </label>
+
+  <label>Chaos <span class="val" id="chaosVal"></span>
+    <input id="chaos" type="range" min="0" max="1" step="0.01" value="0.48">
+  </label>
+
+  <label>Pitch spread <span class="val" id="spreadVal"></span>
+    <input id="spread" type="range" min="0" max="24" step="0.1" value="7">
+  </label>
+
+  <label>Output level <span class="val" id="levelVal"></span>
+    <input id="level" type="range" min="0" max="1" step="0.01" value="0.5">
+  </label>
+
+  <div id="swarmReadout" class="swarm-readout"></div>
+</div>
+
+<div id="routing"></div>
+
+<script src="osc-browser.min.js"></script>
+<script src="dissonance.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let ctx = null;
+let swarmNode = null;
+let outGain = null;
+let workletReady = null;
+
+const SWARM_WORKLET = `
+class BeeSwarmProcessor extends AudioWorkletProcessor {
+  static get parameterDescriptors() {
+    return [
+      { name:'count', defaultValue:24, minValue:1, maxValue:80, automationRate:'k-rate' },
+      { name:'fundamental', defaultValue:165, minValue:40, maxValue:800, automationRate:'k-rate' },
+      { name:'chaos', defaultValue:0.48, minValue:0, maxValue:1, automationRate:'k-rate' },
+      { name:'spread', defaultValue:7, minValue:0, maxValue:36, automationRate:'k-rate' }
+    ];
+  }
+
+  constructor() {
+    super();
+    this.voices = 16;
+    this.phase = new Float64Array(this.voices);
+    this.wanderPhase = new Float64Array(this.voices);
+    this.detuneSeed = new Float64Array(this.voices);
+    this.ampSeed = new Float64Array(this.voices);
+    this.noiseState = 0;
+    this.rng = 0x6d2b79f5;
+    let seed = 0x51a77e;
+    const rand = () => {
+      seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
+      return (seed >>> 0) / 4294967296;
+    };
+    for (let i=0; i<this.voices; i++) {
+      this.phase[i] = rand();
+      this.wanderPhase[i] = rand();
+      this.detuneSeed[i] = rand() * 2 - 1;
+      this.ampSeed[i] = 0.72 + rand() * 0.28;
+    }
+  }
+
+  rand() {
+    let x = this.rng;
+    x ^= x << 13; x ^= x >>> 17; x ^= x << 5;
+    this.rng = x >>> 0;
+    return ((x >>> 0) / 2147483648) - 1;
+  }
+
+  process(inputs, outputs, parameters) {
+    const out = outputs[0] && outputs[0][0];
+    if (!out) return true;
+    const count = Math.max(1, Math.min(80, parameters.count[0]));
+    const fundamental = parameters.fundamental[0];
+    const chaos = parameters.chaos[0];
+    const spread = parameters.spread[0];
+    const twoPi = Math.PI * 2;
+
+    const density = (count - 1) / 79;
+    const active = 2 + density * (this.voices - 2);
+    const whole = Math.floor(active);
+    const frac = active - whole;
+
+    for (let s=0; s<out.length; s++) {
+      let tonal = 0;
+      let weightSum = 0;
+      for (let i=0; i<this.voices; i++) {
+        const weight = i < whole ? 1 : (i === whole ? frac : 0);
+        if (weight <= 0) continue;
+        const wanderRate = 0.07 + i * 0.011 + chaos * 0.18;
+        this.wanderPhase[i] += wanderRate / sampleRate;
+        if (this.wanderPhase[i] >= 1) this.wanderPhase[i] -= 1;
+        const wander = Math.sin(twoPi * this.wanderPhase[i] + i * 1.73);
+        const semi = this.detuneSeed[i] * spread + wander * chaos * (1.4 + density * 1.8);
+        const freq = fundamental * Math.pow(2, semi / 12);
+        this.phase[i] += freq / sampleRate;
+        if (this.phase[i] >= 1) this.phase[i] -= 1;
+        const ph = this.phase[i];
+        const p = twoPi * ph;
+        const saw = 2 * ph - 1;
+        const tri = 1 - 4 * Math.abs(ph - 0.5);
+        const body = 0.50 * tri + 0.23 * saw
+                   + 0.17 * Math.sin(2 * p + i * 0.41)
+                   + 0.10 * Math.sin(3 * p + i * 0.89);
+        tonal += body * this.ampSeed[i] * weight;
+        weightSum += weight;
+      }
+
+      const n = this.rand();
+      const smooth = 0.985 - chaos * 0.10 - density * 0.025;
+      this.noiseState = this.noiseState * smooth + n * (1 - smooth);
+      const rasp = this.noiseState * (0.12 + density * 0.36 + chaos * 0.28);
+      const norm = Math.sqrt(Math.max(1, weightSum));
+      let sample = tonal * (0.68 / norm) + rasp;
+      sample += this.rand() * 0.006 * (0.3 + density * 0.7) * (0.4 + chaos * 0.6);
+      out[s] = Math.tanh(sample * 0.72);
+    }
+    return true;
+  }
+}
+registerProcessor('bee-swarm-processor', BeeSwarmProcessor);
+`;
+
+function loadWorklet() {
+  if (workletReady) return workletReady;
+  const blob = new Blob([SWARM_WORKLET], {type:'application/javascript'});
+  const url = URL.createObjectURL(blob);
+  workletReady = ctx.audioWorklet.addModule(url).finally(() => URL.revokeObjectURL(url));
+  return workletReady;
+}
+
+async function startAudio() {
+  if (ctx) {
+    await ctx.resume();
+    return;
+  }
+  ctx = audioContext();
+  await ctx.resume();
+  await loadWorklet();
+
+  swarmNode = new AudioWorkletNode(ctx, 'bee-swarm-processor', {
+    numberOfInputs: 0,
+    numberOfOutputs: 1,
+    outputChannelCount: [1]
+  });
+  outGain = ctx.createGain();
+  swarmNode.connect(outGain).connect(audioOut({ anchor:'start' }));
+  updateAudio();
+  $('start').textContent = 'Swarm running';
+}
+
+function setParam(name, value) {
+  if (!swarmNode || !ctx) return;
+  const p = swarmNode.parameters.get(name);
+  if (p) p.setTargetAtTime(value, ctx.currentTime, 0.03);
+}
+
+function updateAudio() {
+  const count = Math.round(countP.value);
+  const fundamental = fundamentalP.value;
+  const chaos = chaosP.value;
+  const spread = spreadP.value;
+  const level = levelP.value;
+
+  $('countVal').textContent = count;
+  $('fundamentalVal').textContent = Math.round(fundamental) + ' Hz';
+  $('chaosVal').textContent = Math.round(chaos * 100) + '%';
+  $('spreadVal').textContent = spread.toFixed(1) + ' st';
+  $('levelVal').textContent = level.toFixed(2);
+  $('swarmReadout').textContent = `${count} bees · ${Math.round(fundamental)} Hz center · ±${spread.toFixed(1)} semitones · ${Math.round(chaos*100)}% chaos`;
+
+  setParam('count', count);
+  setParam('fundamental', fundamental);
+  setParam('chaos', chaos);
+  setParam('spread', spread);
+  if (outGain && ctx) outGain.gain.setTargetAtTime(level, ctx.currentTime, 0.03);
+}
+
+$('start').onclick = startAudio;
+
+const countP = param('bee-count', {
+  input:'count', min:1, max:80, send:'shared', listen:'', onChange:updateAudio
+});
+const fundamentalP = param('bee-fundamental', {
+  input:'fundamental', min:55, max:500, send:'shared', listen:'', onChange:updateAudio
+});
+const chaosP = param('bee-chaos', {
+  input:'chaos', min:0, max:1, send:'shared', listen:'', onChange:updateAudio
+});
+const spreadP = param('bee-spread', {
+  input:'spread', min:0, max:24, send:'shared', listen:'', onChange:updateAudio
+});
+const levelP = param('bee-level', {
+  input:'level', min:0, max:1, send:'personal', listen:'', onChange:updateAudio
+});
+
+updateAudio();
+</script>
+</body>
+</html>

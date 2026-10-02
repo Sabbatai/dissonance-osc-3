@@ -28,6 +28,8 @@ const HTTPS_PORT = 8443;
 const UDP_IN = 57121;
 const PUBLIC = path.join(__dirname, "public");
 const CERT_DIR = path.join(__dirname, "cert");
+const INSTRUMENT_DIR = path.join(__dirname, "instruments");
+const INSTRUMENT_META = path.join(INSTRUMENT_DIR, "index.json");
 
 const udpPeers = new Map(); // "ip:port" -> {address, port}
 
@@ -35,6 +37,8 @@ main().catch((e) => { console.error(e); process.exit(1); });
 
 async function main() {
   const creds = await certificate();
+  fs.mkdirSync(INSTRUMENT_DIR, { recursive: true });
+  if (!fs.existsSync(INSTRUMENT_META)) fs.writeFileSync(INSTRUMENT_META, "[]\n");
 
   // ---------- static files ----------
   const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json" };
@@ -44,6 +48,31 @@ async function main() {
       res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
       return res.end(JSON.stringify([...publishers.keys()].sort()));
     }
+
+    // Shared instrument library. Participants post a complete HTML instrument
+    // from submit.html; the relay stores it outside ./public so uploaded files
+    // can never overwrite the built-in workshop instruments.
+    if (url.pathname === "/api/instruments") {
+      if (req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        return res.end(JSON.stringify(readInstrumentIndex()));
+      }
+      if (req.method === "POST") return receiveInstrument(req, res);
+      res.writeHead(405, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: "method not allowed" }));
+    }
+
+    if (url.pathname.startsWith("/instruments/")) {
+      const name = path.basename(decodeURIComponent(url.pathname));
+      if (!name.endsWith(".html")) { res.writeHead(404); return res.end("not found"); }
+      const file = path.join(INSTRUMENT_DIR, name);
+      return fs.readFile(file, (err, data) => {
+        if (err) { res.writeHead(404); return res.end("not found"); }
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
+        res.end(data);
+      });
+    }
+
     const file = path.join(PUBLIC, url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname));
     if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); }
     fs.readFile(file, (err, data) => {
@@ -141,6 +170,85 @@ async function main() {
     console.log(`  (the browser will warn about the certificate once: choose Advanced, then proceed)`);
     console.log(`  native OSC: send to port ${UDP_IN} (send /hello once to subscribe)\n`);
   });
+}
+
+
+function readInstrumentIndex() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(INSTRUMENT_META, "utf8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) { return []; }
+}
+
+function receiveInstrument(req, res) {
+  const MAX = 768 * 1024; // plenty for a single-file Web Audio instrument
+  let size = 0, body = "";
+  req.setEncoding("utf8");
+  req.on("data", (chunk) => {
+    size += Buffer.byteLength(chunk);
+    if (size > MAX) {
+      res.writeHead(413, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "instrument is too large" }));
+      req.destroy();
+      return;
+    }
+    body += chunk;
+  });
+  req.on("end", () => {
+    if (res.writableEnded) return;
+    let data;
+    try { data = JSON.parse(body); }
+    catch (_) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: "invalid upload" }));
+    }
+
+    const title = cleanLabel(data.title, 80);
+    const author = cleanLabel(data.author, 80);
+    let html = typeof data.html === "string" ? data.html.trim() : "";
+    if (!title || !html || !/<html|<!doctype/i.test(html)) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: "give the instrument a name and upload a complete HTML file" }));
+    }
+
+    // Participant-generated files usually refer to dissonance.js relatively.
+    // A <base> tag makes those references resolve to the relay root even though
+    // contributions live under /instruments/.
+    if (!/<base\b/i.test(html)) {
+      html = /<head[^>]*>/i.test(html)
+        ? html.replace(/<head([^>]*)>/i, '<head$1>\n<base href="/">')
+        : '<base href="/">\n' + html;
+    }
+
+    const stem = slug(title) || "instrument";
+    const stamp = Date.now().toString(36);
+    const filename = `${stem}-${stamp}.html`;
+    fs.writeFileSync(path.join(INSTRUMENT_DIR, filename), html, "utf8");
+
+    const items = readInstrumentIndex();
+    const item = {
+      id: filename.replace(/\.html$/, ""),
+      title,
+      author,
+      file: filename,
+      url: `/instruments/${filename}`,
+      createdAt: new Date().toISOString(),
+    };
+    items.unshift(item);
+    fs.writeFileSync(INSTRUMENT_META, JSON.stringify(items.slice(0, 250), null, 2) + "\n");
+
+    log(`instrument posted: ${title}${author ? ` by ${author}` : ""}`);
+    res.writeHead(201, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    res.end(JSON.stringify(item));
+  });
+}
+
+function cleanLabel(value, max) {
+  return String(value || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
+}
+function slug(value) {
+  return String(value || "").toLowerCase().normalize("NFKD")
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
 }
 
 // A self-made certificate, created once and reused so browsers only warn once.

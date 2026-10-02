@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<base href="/">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vocal Cluster</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 15px/1.4 system-ui, sans-serif; max-width: 650px; margin: 24px auto; padding: 0 16px 40px; background:#111; color:#eee; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:#999; margin:0 0 18px; }
+  .status { color:#999; font-size:13px; margin-bottom:14px; }
+  .status.on { color:#7d7; }
+  button, select, input { font:inherit; }
+  button { padding:8px 14px; margin:4px 8px 4px 0; background:#292929; color:#eee; border:1px solid #555; border-radius:5px; cursor:pointer; }
+  button.active { background:#eee; color:#111; }
+  label { display:block; margin:14px 0 3px; }
+  input[type=range] { width:100%; }
+  input[type=text] { background:#222; color:#eee; border:1px solid #444; border-radius:4px; padding:5px 7px; }
+  select { background:#222; color:#eee; border:1px solid #444; border-radius:4px; padding:5px 7px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin:10px 0; }
+  .panel { border:1px solid #333; border-radius:8px; padding:12px 14px; margin:14px 0; background:#161616; }
+  .val { color:#aaa; font-size:13px; margin-left:6px; }
+  .voices { font:13px ui-monospace, SFMono-Regular, Menlo, monospace; color:#9b9; margin-top:8px; }
+  .warn { color:#dbb36b; font-size:13px; }
+  #log { margin-top:20px; font:12px/1.3 ui-monospace, monospace; color:#8a8; height:80px; overflow:auto; background:#000; padding:8px; border-radius:4px; white-space:pre; }
+</style>
+</head>
+<body>
+<h1>Vocal Cluster</h1>
+<p class="sub">A live time-based pitch shifter for voice or another participant's audio.</p>
+<div id="status" class="status">not connected</div>
+
+<div class="panel">
+  <button id="start">Start sound</button>
+  <label>My name <input id="name" type="text" value="vocal"></label>
+  <label>Input source
+    <select id="inputMode">
+      <option value="mic">microphone</option>
+      <option value="network">another participant</option>
+    </select>
+  </label>
+  <div id="networkAnchor" style="display:none; margin-top:8px;">Choose whose sound to process:</div>
+  <div class="warn">Headphones are recommended when using the microphone with “my speakers” enabled.</div>
+</div>
+
+<div class="panel">
+  <strong>Pitch cluster</strong>
+  <div class="row" id="voiceButtons">
+    <button type="button" data-voices="1">1 voice</button>
+    <button type="button" data-voices="3" class="active">3 voices</button>
+    <button type="button" data-voices="5">5 voices</button>
+  </div>
+
+  <label>Center shift <span class="val" id="centerVal"></span>
+    <input id="center" type="range" min="-12" max="12" step="0.1" value="0">
+  </label>
+
+  <label>Pitch spacing <span class="val" id="spacingVal"></span>
+    <input id="spacing" type="range" min="0" max="12" step="0.1" value="7">
+  </label>
+
+  <label>Grain / delay window <span class="val" id="windowVal"></span>
+    <input id="windowMs" type="range" min="20" max="180" step="1" value="70">
+  </label>
+
+  <div class="voices" id="voiceReadout"></div>
+</div>
+
+<div class="panel">
+  <strong>Mix</strong>
+  <label>Dry / shifted <span class="val" id="mixVal"></span>
+    <input id="mix" type="range" min="0" max="1" step="0.01" value="0.85">
+  </label>
+  <label>Output level <span class="val" id="levelVal"></span>
+    <input id="level" type="range" min="0" max="1.25" step="0.01" value="0.8">
+  </label>
+</div>
+
+<div id="routing"></div>
+<div id="log"></div>
+
+<script src="osc-browser.min.js"></script>
+<script src="dissonance.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+let ctx = null;
+let micSource = null;
+let micStream = null;
+let networkSource = null;
+let micGain = null;
+let networkGain = null;
+let inputBus = null;
+let dryGain = null;
+let wetGain = null;
+let outputGain = null;
+let wetSum = null;
+let voiceCount = 3;
+let shifters = [];
+let workletReady = null;
+
+// A small live pitch shifter implemented as a variable-delay AudioWorklet.
+// Two delay taps sweep in opposite phases and crossfade so the delay reset
+// is hidden. The sweep rate determines pitch ratio; windowMs determines
+// the delay excursion and therefore the texture/latency.
+const SHIFTER_WORKLET = `
+class DissonancePitchShift extends AudioWorkletProcessor {
+  static get parameterDescriptors() {
+    return [
+      { name: 'semitones', defaultValue: 0, minValue: -36, maxValue: 36, automationRate: 'k-rate' },
+      { name: 'windowMs', defaultValue: 70, minValue: 15, maxValue: 250, automationRate: 'k-rate' }
+    ];
+  }
+  constructor() {
+    super();
+    this.size = Math.ceil(sampleRate * 0.8);
+    this.buf = new Float32Array(this.size);
+    this.write = 0;
+    this.phase = 0;
+  }
+  read(pos) {
+    while (pos < 0) pos += this.size;
+    while (pos >= this.size) pos -= this.size;
+    const i0 = Math.floor(pos);
+    const i1 = (i0 + 1) % this.size;
+    const f = pos - i0;
+    return this.buf[i0] * (1 - f) + this.buf[i1] * f;
+  }
+  process(inputs, outputs, parameters) {
+    const input = inputs[0];
+    const output = outputs[0];
+    if (!output || !output[0]) return true;
+    const out = output[0];
+    const x = input && input[0] ? input[0] : null;
+    const st = parameters.semitones[0];
+    const ratio = Math.pow(2, st / 12);
+    const win = Math.max(15, parameters.windowMs[0]) * sampleRate / 1000;
+    const range = Math.max(32, Math.min(win, this.size * 0.35));
+    const base = range + 64;
+    const delta = Math.abs(ratio - 1);
+    const phaseInc = delta < 0.00001 ? 0 : delta / range;
+
+    for (let i = 0; i < out.length; i++) {
+      const sample = x ? x[i] || 0 : 0;
+      this.buf[this.write] = sample;
+
+      if (delta < 0.00001) {
+        out[i] = this.read(this.write - 64);
+      } else {
+        const p1 = this.phase;
+        const p2 = (this.phase + 0.5) % 1;
+        const d1 = ratio >= 1 ? base - p1 * range : 64 + p1 * range;
+        const d2 = ratio >= 1 ? base - p2 * range : 64 + p2 * range;
+
+        // Raised-cosine grain envelopes. Each is strongest halfway through
+        // its sweep; the pair overlap so resets are much less audible.
+        const e1 = 0.5 - 0.5 * Math.cos(2 * Math.PI * p1);
+        const e2 = 0.5 - 0.5 * Math.cos(2 * Math.PI * p2);
+        const denom = e1 + e2 + 1e-6;
+        out[i] = (this.read(this.write - d1) * e1 + this.read(this.write - d2) * e2) / denom;
+
+        this.phase += phaseInc;
+        if (this.phase >= 1) this.phase -= 1;
+      }
+      this.write++;
+      if (this.write >= this.size) this.write = 0;
+    }
+    return true;
+  }
+}
+registerProcessor('dissonance-pitch-shift', DissonancePitchShift);
+`;
+
+function loadPitchWorklet() {
+  if (workletReady) return workletReady;
+  const blob = new Blob([SHIFTER_WORKLET], { type: 'application/javascript' });
+  const url = URL.createObjectURL(blob);
+  workletReady = ctx.audioWorklet.addModule(url).finally(() => URL.revokeObjectURL(url));
+  return workletReady;
+}
+
+function offsets() {
+  const c = centerP.value;
+  const s = spacingP.value;
+  if (voiceCount === 1) return [c];
+  if (voiceCount === 3) return [c - s, c, c + s];
+  return [c - 2*s, c - s, c, c + s, c + 2*s];
+}
+
+function prettySemi(v) {
+  if (Math.abs(v) < 0.05) return '0';
+  return (v > 0 ? '+' : '') + v.toFixed(1);
+}
+
+async function startAudio() {
+  if (ctx) { await ctx.resume(); return; }
+  ctx = audioContext();
+  await ctx.resume();
+  await loadPitchWorklet();
+
+  inputBus = ctx.createGain();
+  micGain = ctx.createGain();
+  networkGain = ctx.createGain();
+  micGain.gain.value = 0;
+  networkGain.gain.value = 0;
+  micGain.connect(inputBus);
+  networkGain.connect(inputBus);
+
+  networkSource = audioIn('input', { anchor: 'networkAnchor' });
+  networkSource.connect(networkGain);
+
+  dryGain = ctx.createGain();
+  wetGain = ctx.createGain();
+  wetSum = ctx.createGain();
+  outputGain = ctx.createGain();
+
+  inputBus.connect(dryGain).connect(outputGain);
+  wetSum.connect(wetGain).connect(outputGain);
+  outputGain.connect(audioOut({ anchor: 'start' }));
+
+  await setupMicrophone();
+  rebuildVoices();
+  updateAll();
+  updateInputMode();
+}
+
+async function setupMicrophone() {
+  if (micSource) return;
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      video: false
+    });
+    micSource = ctx.createMediaStreamSource(micStream);
+    micSource.connect(micGain);
+  } catch (err) {
+    console.warn('Microphone unavailable:', err);
+    $('inputMode').value = 'network';
+    updateInputMode();
+  }
+}
+
+function updateInputMode() {
+  const mode = $('inputMode').value;
+  $('networkAnchor').style.display = mode === 'network' ? '' : 'none';
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  micGain.gain.setTargetAtTime(mode === 'mic' ? 1 : 0, t, 0.02);
+  networkGain.gain.setTargetAtTime(mode === 'network' ? 1 : 0, t, 0.02);
+}
+
+function disconnectVoices() {
+  for (const v of shifters) {
+    try { inputBus.disconnect(v.node); } catch (_) {}
+    try { v.node.disconnect(); } catch (_) {}
+  }
+  shifters = [];
+}
+
+function rebuildVoices() {
+  if (!ctx || !wetSum) return;
+  disconnectVoices();
+  const offs = offsets();
+  const gainPerVoice = 1 / Math.sqrt(offs.length);
+  for (const semi of offs) {
+    const node = new AudioWorkletNode(ctx, 'dissonance-pitch-shift', { outputChannelCount: [1] });
+    const g = ctx.createGain();
+    g.gain.value = gainPerVoice;
+    node.parameters.get('semitones').value = semi;
+    node.parameters.get('windowMs').value = windowP.value;
+    inputBus.connect(node).connect(g).connect(wetSum);
+    shifters.push({ node, gain: g });
+  }
+  paintVoices();
+}
+
+function updatePitchVoices() {
+  paintVoices();
+  if (!ctx || !shifters.length) return;
+  const offs = offsets();
+  const t = ctx.currentTime;
+  shifters.forEach((v, i) => {
+    v.node.parameters.get('semitones').setTargetAtTime(offs[i], t, 0.03);
+    v.node.parameters.get('windowMs').setTargetAtTime(windowP.value, t, 0.03);
+  });
+}
+
+function updateMix() {
+  $('mixVal').textContent = Math.round(mixP.value * 100) + '% shifted';
+  $('levelVal').textContent = levelP.value.toFixed(2);
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  // Equal-power-ish wet/dry blend.
+  dryGain.gain.setTargetAtTime(Math.cos(mixP.value * Math.PI * 0.5), t, 0.02);
+  wetGain.gain.setTargetAtTime(Math.sin(mixP.value * Math.PI * 0.5), t, 0.02);
+  outputGain.gain.setTargetAtTime(levelP.value, t, 0.02);
+}
+
+function paintVoices() {
+  $('centerVal').textContent = prettySemi(centerP.value) + ' st';
+  $('spacingVal').textContent = spacingP.value.toFixed(1) + ' st';
+  $('windowVal').textContent = Math.round(windowP.value) + ' ms';
+  $('voiceReadout').textContent = 'voices: ' + offsets().map(prettySemi).join('  ');
+  document.querySelectorAll('[data-voices]').forEach(b => b.classList.toggle('active', +b.dataset.voices === voiceCount));
+}
+
+function updateAll() {
+  updatePitchVoices();
+  updateMix();
+}
+
+$('start').onclick = startAudio;
+$('inputMode').onchange = updateInputMode;
+document.querySelectorAll('[data-voices]').forEach(btn => {
+  btn.onclick = () => {
+    voiceCount = +btn.dataset.voices;
+    rebuildVoices();
+  };
+});
+
+const centerP = param('center-shift', { input:'center', min:-12, max:12, send:'personal', listen:'', onChange:updatePitchVoices });
+const spacingP = param('pitch-spacing', { input:'spacing', min:0, max:12, send:'shared', listen:'', onChange:updatePitchVoices });
+const windowP = param('grain-window', { input:'windowMs', min:20, max:180, send:'personal', listen:'', onChange:updatePitchVoices });
+const mixP = param('shift-mix', { input:'mix', min:0, max:1, send:'shared', listen:'', onChange:updateMix });
+const levelP = param('output-level', { input:'level', min:0, max:1.25, send:'personal', listen:'', onChange:updateMix });
+
+paintVoices();
+updateMix();
+</script>
+</body>
+</html>

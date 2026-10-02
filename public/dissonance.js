@@ -311,13 +311,6 @@
 
     let sendNode = null, as = null, netId = 0;
     const dot = mkDot();
-    const dbg = document.createElement("span");
-    dbg.style.cssText = "display:block;font:11px ui-monospace,monospace;color:#f6c;margin:3px 0";
-    dbg.textContent = "audio debug: waiting";
-    let renderBlocks = 0, workletPackets = 0, workerSends = 0;
-    window.__dissAudioDebug = () => ({ renderBlocks, workletPackets, workerSends, contextState: ctx.state, hidden: document.hidden, focus: document.hasFocus() });
-    window.addEventListener("diss-pubstats", (e) => { workerSends = e.detail.sends || workerSends; paintDbg(); });
-    function paintDbg() { dbg.textContent = `audio debug — render blocks ${renderBlocks} | worklet packets ${workletPackets} | WS sends ${workerSends} | ctx ${ctx.state}`; }
     function connect() {
       if (!sendNode) return;
       const want = st.net ? myName() : null;
@@ -329,9 +322,6 @@
     }
     workletReady.then(() => {
       sendNode = new AudioWorkletNode(ctx, "dissonance-send");
-      sendNode.port.onmessage = (e) => {
-        if (e.data && e.data.__dissSendStats) { renderBlocks = e.data.blocks; workletPackets = e.data.packets; paintDbg(); }
-      };
       const sink = ctx.createGain(); sink.gain.value = 0;
       bus.connect(sendNode); sendNode.connect(sink).connect(ctx.destination);   // keeps it running everywhere
       connect();
@@ -342,7 +332,6 @@
       toggle("send audio", st.net, (v) => { st.net = v; saveA("out-net", v); connect(); }),
       toggle("my speakers", st.speaker, (v) => { st.speaker = v; saveA("out-speaker", v); speaker.gain.setTargetAtTime(v ? 1 : 0, ctx.currentTime, 0.02); }));
     placeStrip(o.anchor || "start", "audio out", strip);
-    strip.after(dbg);
     outBus = bus;
     strip.before(stopButton());
     return bus;
@@ -428,12 +417,7 @@
         const s = { id: m.id, url: m.url, kind: m.kind, port: m.port, closed: false, ws: null, n: 0 };
         socks.set(m.id, s);
         if (s.kind === "pub") s.port.onmessage = (ev) => {
-          if (s.ws && s.ws.readyState === 1) {
-            s.ws.send(ev.data);
-            s.n++;
-            if (s.n % 8 === 0) postMessage(s.id);
-            if (s.n % 50 === 0) postMessage({kind:"pubstats", id:s.id, sends:s.n});
-          }
+          if (s.ws && s.ws.readyState === 1) { s.ws.send(ev.data); if (++s.n % 8 === 0) postMessage(s.id); }
         };
         connect(s);
       } else if (m.cmd === "close") {
@@ -457,14 +441,7 @@
   function netOpen(kind, name, node, dot) {
     if (!netWorker) {
       netWorker = new Worker(URL.createObjectURL(new Blob([NET_SRC], { type: "text/javascript" })));
-      netWorker.onmessage = (e) => {
-        const msg = e.data;
-        const id = (msg && typeof msg === "object") ? msg.id : msg;
-        const d = netDots.get(id); if (d) pulseDot(d);
-        if (msg && typeof msg === "object" && msg.kind === "pubstats") {
-          window.dispatchEvent(new CustomEvent("diss-pubstats", { detail: msg }));
-        }
-      };
+      netWorker.onmessage = (e) => { const d = netDots.get(e.data); if (d) pulseDot(d); };
     }
     const ch = new MessageChannel();
     node.port.postMessage({ port: ch.port1 }, [ch.port1]);

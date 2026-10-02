@@ -81,7 +81,6 @@
 <button id="pulse">pulse (realign everyone)</button>
 
 <div id="routing"></div>
-<div id="seqDebug" style="margin-top:8px;font:11px ui-monospace,monospace;color:#6cf">scheduler debug: waiting</div>
 <div id="log"></div>
 
 <script src="osc-browser.min.js"></script>
@@ -145,7 +144,6 @@ function pluckPitch(step) {
 
 let ctx, master, noiseBuf;
 let running = false, nextTime = 0, stepCount = 0, timer = null, pendingReset = false;
-let dbgSchedCalls = 0, dbgSteps = 0, dbgLate = 0, dbgMaxLate = 0;
 let density = 0.4, brightness = 0.5;
 
 const $ = (id) => document.getElementById(id);
@@ -261,11 +259,7 @@ function stepDur(n) {
   return n % 2 === 0 ? base * (1 + sw) : base * (1 - sw);
 }
 function schedule() {
-  dbgSchedCalls++;
   while (nextTime < ctx.currentTime + lookahead()) {
-    const late = ctx.currentTime - nextTime;
-    if (late > 0.02) { dbgLate++; dbgMaxLate = Math.max(dbgMaxLate, late); }
-    dbgSteps++;
     playStep(nextTime);
     nextTime += stepDur(stepCount);
     stepCount++;
@@ -358,9 +352,6 @@ $("start").onclick = () => {
   running = true;
   nextTime = ctx.currentTime + 0.05;
   timer = bgInterval(schedule, 25);
-  bgInterval(() => {
-    $("seqDebug").textContent = `scheduler debug — calls ${dbgSchedCalls} | steps ${dbgSteps} | late steps ${dbgLate} | max late ${dbgMaxLate.toFixed(3)}s | lookahead ${lookahead().toFixed(2)}s | ctx ${ctx.state}`;
-  }, 250);
 };
 $("stop").onclick = () => { running = false; clearBg(timer); };
 

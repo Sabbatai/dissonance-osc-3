@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<base href="/">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Four LFOs</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 22px; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #111; color: #eee; max-width: 1100px;
+  }
+  h1 { margin: 0 0 4px; font-size: 1.7rem; }
+  .hint { color: #aaa; margin-bottom: 18px; max-width: 850px; line-height: 1.45; }
+  .top {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin-bottom: 18px;
+  }
+  label { display: grid; gap: 5px; font-size: .9rem; color: #ccc; }
+  input, select, button {
+    font: inherit; color: inherit; background: #222; border: 1px solid #444;
+    border-radius: 6px; padding: 7px 9px;
+  }
+  button { cursor: pointer; min-height: 38px; }
+  button.on { background: #d7ffd7; color: #111; border-color: #d7ffd7; }
+  .grid {
+    display: grid; grid-template-columns: repeat(2, minmax(280px, 1fr)); gap: 14px;
+  }
+  .card {
+    border: 1px solid #383838; border-radius: 10px; padding: 14px; background: #171717;
+  }
+  .card h2 { margin: 0 0 12px; font-size: 1.1rem; }
+  .controls {
+    display: grid; grid-template-columns: repeat(2, minmax(120px, 1fr)); gap: 10px 14px;
+  }
+  .controls input[type=range] { width: 100%; padding: 0; }
+  .readout { color: #9f9; font-variant-numeric: tabular-nums; min-width: 5ch; }
+  .meter {
+    height: 18px; background: #090909; border: 1px solid #333; border-radius: 9px;
+    overflow: hidden; margin-top: 12px; position: relative;
+  }
+  .fill {
+    height: 100%; width: 50%; background: linear-gradient(90deg,#555,#eee);
+    transform-origin: left center;
+  }
+  .value {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    font-size: 11px; color: #fff; text-shadow: 0 1px 2px #000;
+  }
+  .route-anchor { margin-top: 10px; min-height: 28px; }
+  .small { color:#888; font-size:.82rem; margin-top:6px; }
+  @media (max-width: 720px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Four LFOs</h1>
+<div class="hint">
+  Four independent low-frequency oscillators for controlling other Dissonance instruments.
+  Start them here, then on another instrument choose an LFO from that parameter's <b>in</b> menu.
+  Each LFO outputs a continuous value from 0 to 1.
+</div>
+
+<div class="top">
+  <label>Your name
+    <input id="name" value="lfo-player" size="16">
+  </label>
+  <button id="run">Start LFOs</button>
+  <button id="reset">Reset phases</button>
+  <span id="status" class="small">stopped</span>
+</div>
+
+<div class="grid" id="cards"></div>
+
+<script src="osc-browser.min.js"></script>
+<script src="dissonance.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+
+const specs = [
+  { rate: 0.20, depth: 1.00, center: 0.50, phase: 0,   wave: "sine" },
+  { rate: 0.33, depth: 0.70, center: 0.50, phase: 90,  wave: "triangle" },
+  { rate: 0.50, depth: 0.50, center: 0.50, phase: 180, wave: "sine" },
+  { rate: 0.08, depth: 1.00, center: 0.50, phase: 270, wave: "samplehold" }
+];
+
+const lfos = [];
+let running = false;
+let timer = null;
+let startMS = performance.now();
+let phaseEpoch = startMS;
+
+function card(i, s) {
+  const n = i + 1;
+  const div = document.createElement("section");
+  div.className = "card";
+  div.innerHTML = `
+    <h2>LFO ${n}</h2>
+    <div class="controls">
+      <label>Waveform
+        <select id="wave${n}">
+          <option value="sine">sine</option>
+          <option value="triangle">triangle</option>
+          <option value="saw">saw</option>
+          <option value="square">square</option>
+          <option value="samplehold">random steps</option>
+          <option value="smoothrandom">smooth random</option>
+        </select>
+      </label>
+      <label>Rate <span><span id="rateVal${n}" class="readout"></span> Hz</span>
+        <input id="rate${n}" type="range" min="0.01" max="10" step="0.01" value="${s.rate}">
+      </label>
+      <label>Depth <span id="depthVal${n}" class="readout"></span>
+        <input id="depth${n}" type="range" min="0" max="1" step="0.01" value="${s.depth}">
+      </label>
+      <label>Center <span id="centerVal${n}" class="readout"></span>
+        <input id="center${n}" type="range" min="0" max="1" step="0.01" value="${s.center}">
+      </label>
+      <label>Phase <span><span id="phaseVal${n}" class="readout"></span>°</span>
+        <input id="phase${n}" type="range" min="0" max="360" step="1" value="${s.phase}">
+      </label>
+    </div>
+    <div class="meter">
+      <div class="fill" id="fill${n}"></div>
+      <div class="value" id="outVal${n}">0.500</div>
+    </div>
+    <div class="route-anchor" id="route${n}"></div>
+    <div class="small">Route another instrument parameter from <b>${$("name").value || "lfo-player"} lfo${n}</b>.</div>
+  `;
+  $("cards").append(div);
+  $("wave"+n).value = s.wave;
+}
+
+specs.forEach((s,i) => card(i,s));
+
+function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+
+function tri(p) {
+  return 1 - 4 * Math.abs(Math.round(p - 0.25) - (p - 0.25));
+}
+function saw(p) { return 2 * (p - Math.floor(p)) - 1; }
+function square(p) { return (p % 1) < 0.5 ? 1 : -1; }
+
+function hash01(x) {
+  const s = Math.sin(x * 12.9898 + 78.233) * 43758.5453;
+  return s - Math.floor(s);
+}
+function smoothstep(x) { return x*x*(3-2*x); }
+function sampleHold(cycles, seed) {
+  const k = Math.floor(cycles);
+  return hash01(k + seed * 1000) * 2 - 1;
+}
+function smoothRandom(cycles, seed) {
+  const k = Math.floor(cycles);
+  const f = smoothstep(cycles - k);
+  const a = hash01(k + seed * 1000) * 2 - 1;
+  const b = hash01(k + 1 + seed * 1000) * 2 - 1;
+  return a + (b-a) * f;
+}
+
+for (let i=0; i<4; i++) {
+  const n = i+1;
+  const p = param("lfo"+n, {
+    kind: "out",
+    min: 0,
+    max: 1,
+    value: 0.5,
+    anchor: "route"+n,
+    send: "personal"
+  });
+  lfos.push({ p, last: 0.5 });
+
+  const refresh = () => {
+    $("rateVal"+n).textContent = (+$("rate"+n).value).toFixed(2);
+    $("depthVal"+n).textContent = (+$("depth"+n).value).toFixed(2);
+    $("centerVal"+n).textContent = (+$("center"+n).value).toFixed(2);
+    $("phaseVal"+n).textContent = Math.round(+$("phase"+n).value);
+  };
+  ["rate","depth","center","phase"].forEach(k => $(""+k+n).addEventListener("input", refresh));
+  refresh();
+}
+
+function compute(i, nowMS) {
+  const n = i+1;
+  const rate = +$("rate"+n).value;
+  const depth = +$("depth"+n).value;
+  const center = +$("center"+n).value;
+  const phase = +$("phase"+n).value / 360;
+  const wave = $("wave"+n).value;
+
+  const sec = (nowMS - phaseEpoch) / 1000;
+  const cycles = sec * rate + phase;
+  const p = ((cycles % 1) + 1) % 1;
+
+  let bipolar = 0;
+  if (wave === "sine") bipolar = Math.sin(p * Math.PI * 2);
+  else if (wave === "triangle") bipolar = tri(p);
+  else if (wave === "saw") bipolar = saw(p);
+  else if (wave === "square") bipolar = square(p);
+  else if (wave === "samplehold") bipolar = sampleHold(cycles, i+1);
+  else if (wave === "smoothrandom") bipolar = smoothRandom(cycles, i+1);
+
+  return clamp01(center + bipolar * depth * 0.5);
+}
+
+function tick() {
+  const now = performance.now();
+  for (let i=0; i<lfos.length; i++) {
+    const n = i+1;
+    const v = compute(i, now);
+    lfos[i].last = v;
+    lfos[i].p.emit(v);
+    $("fill"+n).style.width = (v * 100).toFixed(1) + "%";
+    $("outVal"+n).textContent = v.toFixed(3);
+  }
+}
+
+function start() {
+  if (running) return;
+  running = true;
+  $("run").textContent = "Stop LFOs";
+  $("run").classList.add("on");
+  $("status").textContent = "sending control";
+  // ~30 control updates/sec is smooth enough for modulation without flooding OSC.
+  timer = bgInterval(tick, 33);
+  tick();
+}
+
+function stop() {
+  if (!running) return;
+  running = false;
+  $("run").textContent = "Start LFOs";
+  $("run").classList.remove("on");
+  $("status").textContent = "stopped";
+  if (timer !== null) { clearBg(timer); timer = null; }
+}
+
+$("run").addEventListener("click", () => running ? stop() : start());
+
+$("reset").addEventListener("click", () => {
+  phaseEpoch = performance.now();
+  tick();
+});
+
+window.addEventListener("beforeunload", stop);
+</script>
+</body>
+</html>

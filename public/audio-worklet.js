@@ -23,20 +23,12 @@ class DissonanceSend extends AudioWorkletProcessor {
     this.on = true;
     this.mono = new Float32Array(128);
     this.out = null;   // MessagePort to the network worker
-    this._blocks = 0;
-    this._packets = 0;
-    this._lastStatsFrame = 0;
     this.port.onmessage = (e) => {
       if (e.data.port) this.out = e.data.port;
       if ("on" in e.data) this.on = e.data.on;
     };
   }
   process(inputs) {
-    this._blocks++;
-    if (currentFrame - this._lastStatsFrame >= sampleRate) {
-      this._lastStatsFrame = currentFrame;
-      this.port.postMessage({ __dissSendStats: true, blocks: this._blocks, packets: this._packets, frame: currentFrame });
-    }
     const inp = inputs[0];
     if (!this.on || !inp || !inp.length) return true;
     const len = inp[0].length;
@@ -53,7 +45,7 @@ class DissonanceSend extends AudioWorkletProcessor {
       const s = Math.max(-1, Math.min(1, a + (b - a) * f));
       this.buf[this.n++] = s * 32767;
       if (this.n === PACKET) {
-        if (this.out) { this.out.postMessage(this.buf.buffer, [this.buf.buffer]); this.buf = new Int16Array(PACKET); this._packets++; }
+        if (this.out) { this.out.postMessage(this.buf.buffer, [this.buf.buffer]); this.buf = new Int16Array(PACKET); }
         this.n = 0;
       }
       this.t += this.step;
