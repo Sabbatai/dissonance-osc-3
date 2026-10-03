@@ -62,6 +62,13 @@ async function main() {
       return res.end(JSON.stringify({ error: "method not allowed" }));
     }
 
+    // Delete a posted instrument by its gallery id. The id is resolved through
+    // index.json first; clients never get to choose an arbitrary filesystem path.
+    if (url.pathname.startsWith("/api/instruments/") && req.method === "DELETE") {
+      const id = decodeURIComponent(url.pathname.slice("/api/instruments/".length));
+      return deleteInstrument(id, res);
+    }
+
     if (url.pathname.startsWith("/instruments/")) {
       const name = path.basename(decodeURIComponent(url.pathname));
       if (!name.endsWith(".html")) { res.writeHead(404); return res.end("not found"); }
@@ -241,6 +248,29 @@ function receiveInstrument(req, res) {
     res.writeHead(201, { "Content-Type": "application/json", "Cache-Control": "no-store" });
     res.end(JSON.stringify(item));
   });
+}
+
+function deleteInstrument(id, res) {
+  const items = readInstrumentIndex();
+  const index = items.findIndex((item) => item.id === id);
+  if (index === -1) {
+    res.writeHead(404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    return res.end(JSON.stringify({ error: "instrument not found" }));
+  }
+
+  const [item] = items.splice(index, 1);
+  // Only remove the exact filename stored in the trusted index, and only if it
+  // is a plain .html basename inside ./instruments.
+  const filename = path.basename(String(item.file || ""));
+  if (filename && filename === item.file && filename.endsWith(".html")) {
+    try { fs.unlinkSync(path.join(INSTRUMENT_DIR, filename)); }
+    catch (e) { if (e.code !== "ENOENT") throw e; }
+  }
+
+  fs.writeFileSync(INSTRUMENT_META, JSON.stringify(items, null, 2) + "\n");
+  log(`instrument deleted: ${item.title}${item.author ? ` by ${item.author}` : ""}`);
+  res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+  res.end(JSON.stringify({ ok: true, id: item.id }));
 }
 
 function cleanLabel(value, max) {

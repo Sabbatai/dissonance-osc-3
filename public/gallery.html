@@ -14,7 +14,10 @@
   #list { display:grid; gap:10px; margin-top:24px; }
   .card { border:1px solid #444; border-radius:7px; padding:14px 16px; background:#191919; }
   .card h2 { font-size:18px; margin:0 0 4px; }
-  .card a.open { display:inline-block; margin-top:8px; padding:6px 10px; border:1px solid #555; border-radius:5px; text-decoration:none; background:#292929; }
+  .actions { display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap; }
+  .card a.open, .delete { display:inline-block; padding:6px 10px; border:1px solid #555; border-radius:5px; text-decoration:none; background:#292929; color:#eee; font:inherit; cursor:pointer; }
+  .delete { border-color:#704040; color:#f0b6b6; }
+  .delete:hover { background:#3b2020; }
 </style>
 </head>
 <body>
@@ -33,10 +36,31 @@ async function refresh() {
     list.innerHTML = items.map(x => {
       const by = x.author ? `by ${esc(x.author)} · ` : '';
       const when = x.createdAt ? new Date(x.createdAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
-      return `<div class="card"><h2>${esc(x.title)}</h2><div class="meta">${by}${esc(when)}</div><a class="open" href="${encodeURI(x.url)}" target="_blank" rel="noopener">Open instrument</a></div>`;
+      return `<div class="card" data-id="${esc(x.id)}"><h2>${esc(x.title)}</h2><div class="meta">${by}${esc(when)}</div><div class="actions"><a class="open" href="${encodeURI(x.url)}" target="_blank" rel="noopener">Open instrument</a><button class="delete" data-id="${esc(x.id)}" data-title="${esc(x.title)}">Delete</button></div></div>`;
     }).join('');
   } catch (_) { list.innerHTML = '<p class="empty">Could not load the gallery.</p>'; }
 }
+list.addEventListener('click', async (event) => {
+  const button = event.target.closest('.delete');
+  if (!button) return;
+  const id = button.dataset.id;
+  const title = button.dataset.title || 'this instrument';
+  if (!confirm(`Delete “${title}”? This removes it from the gallery and deletes its HTML file from the server.`)) return;
+
+  button.disabled = true;
+  button.textContent = 'Deleting…';
+  try {
+    const r = await fetch(`/api/instruments/${encodeURIComponent(id)}`, { method:'DELETE' });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `delete failed (${r.status})`);
+    await refresh();
+  } catch (err) {
+    alert(err.message || 'Could not delete instrument.');
+    button.disabled = false;
+    button.textContent = 'Delete';
+  }
+});
+
 refresh();
 setInterval(refresh, 3000);
 </script>
