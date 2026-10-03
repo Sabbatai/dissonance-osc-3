@@ -13,11 +13,13 @@
     color: #eee;
     font: 16px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
-  main { max-width: 920px; margin: 0 auto; padding: 42px 20px 64px; }
+  main { max-width: 980px; margin: 0 auto; padding: 42px 20px 64px; }
   h1 { font-size: clamp(34px, 7vw, 62px); line-height: 1; margin: 0 0 12px; letter-spacing: -0.04em; }
-  h2 { font-size: 20px; margin: 42px 0 14px; }
+  h2 { font-size: 22px; margin: 44px 0 14px; }
+  h3 { font-size: 17px; margin: 0 0 8px; }
   p { margin: 0; }
-  .lede { max-width: 680px; font-size: 18px; color: #bbb; }
+  .lede { max-width: 720px; font-size: 18px; color: #bbb; }
+  .muted { color: #aaa; }
   .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
   .button {
     display: inline-block;
@@ -28,34 +30,87 @@
     color: #fff;
     text-decoration: none;
     font-weight: 650;
+    cursor: pointer;
+    font: inherit;
   }
   .button.primary { background: #eee; color: #111; border-color: #eee; }
+  .button.small { padding: 7px 10px; font-size: 13px; }
   .button:hover { filter: brightness(1.12); }
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(205px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
     gap: 12px;
   }
   .card {
-    display: block;
-    min-height: 160px;
+    min-height: 185px;
     padding: 18px;
     border: 1px solid #3f3f3f;
     border-radius: 10px;
     background: #181818;
-    color: inherit;
-    text-decoration: none;
+    display: flex;
+    flex-direction: column;
   }
-  .card:hover { border-color: #777; background: #1e1e1e; }
   .card strong { display: block; font-size: 19px; margin-bottom: 8px; }
-  .card span { color: #aaa; font-size: 14px; }
+  .card p { color: #aaa; font-size: 14px; flex: 1; }
+  .card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
   .step {
     border-left: 2px solid #555;
     padding-left: 14px;
-    margin: 9px 0;
+    margin: 12px 0;
     color: #bbb;
   }
   .step strong { color: #eee; }
+  .prompt {
+    position: relative;
+    margin-top: 16px;
+    border: 1px solid #3f3f3f;
+    border-radius: 10px;
+    background: #171717;
+    overflow: hidden;
+  }
+  .prompt-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    padding: 10px 12px;
+    border-bottom: 1px solid #333;
+    color: #bbb;
+    font-size: 13px;
+  }
+  pre {
+    margin: 0;
+    padding: 16px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: #ddd;
+  }
+  .ideas {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px;
+    margin-top: 12px;
+  }
+  .idea {
+    padding: 13px;
+    border: 1px solid #333;
+    border-radius: 8px;
+    background: #151515;
+    color: #bbb;
+    font-size: 14px;
+  }
+  .idea strong { color: #eee; display: block; margin-bottom: 4px; }
+  .note {
+    margin-top: 16px;
+    padding: 13px 14px;
+    border: 1px solid #4a4a4a;
+    border-radius: 8px;
+    color: #bbb;
+    background: #161616;
+    font-size: 14px;
+  }
+  code { color: #eee; }
   footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid #333; color: #777; font-size: 13px; }
   footer a { color: #aaa; }
 </style>
@@ -63,46 +118,134 @@
 <body>
 <main>
   <h1>Dissonance</h1>
-  <p class="lede">A shared web-audio space for making, connecting, and performing instruments together.</p>
+  <p class="lede">A shared web-audio space for making, connecting, and performing instruments together. Start with one of the instruments below, modify it, or make something completely new.</p>
 
   <div class="actions">
     <a class="button primary" href="/gallery.html">Open instrument gallery</a>
     <a class="button" href="/submit.html">Post your instrument</a>
+    <a class="button" href="/mixer-pan.html">Open mixer</a>
   </div>
 
   <h2>Start with an instrument</h2>
   <div class="grid">
-    <a class="card" href="/dissonance.html">
+    <div class="card">
       <strong>Dissonance</strong>
-      <span>Drone-based instrument with density, brightness, pitch, pulse, and parameter routing.</span>
-    </a>
-    <a class="card" href="/melody.html">
+      <p>Drone-based instrument with density, brightness, pitch, pulse, and parameter routing. A good general-purpose starting point.</p>
+      <div class="card-actions">
+        <a class="button small" href="/dissonance.html">Open</a>
+        <a class="button small" href="/dissonance.html" download="dissonance.html">Download HTML</a>
+      </div>
+    </div>
+
+    <div class="card">
       <strong>Melody</strong>
-      <span>A simple melodic instrument for playing and routing pitched material.</span>
-    </a>
-    <a class="card" href="/sequencer.html">
+      <p>A simple melodic instrument for playing, generating phrases, and routing pitched material.</p>
+      <div class="card-actions">
+        <a class="button small" href="/melody.html">Open</a>
+        <a class="button small" href="/melody.html" download="melody.html">Download HTML</a>
+      </div>
+    </div>
+
+    <div class="card">
       <strong>Sequencer</strong>
-      <span>Build repeating patterns and connect their controls across the network.</span>
-    </a>
-    <a class="card" href="/fx.html">
+      <p>Build repeating patterns and connect notes, clocks, and controls across the network.</p>
+      <div class="card-actions">
+        <a class="button small" href="/sequencer.html">Open</a>
+        <a class="button small" href="/sequencer.html" download="sequencer.html">Download HTML</a>
+      </div>
+    </div>
+
+    <div class="card">
       <strong>FX</strong>
-      <span>Experiment with effects and processing in the shared audio environment.</span>
-    </a>
+      <p>Process audio coming from another participant and send the result back into the shared performance.</p>
+      <div class="card-actions">
+        <a class="button small" href="/fx.html">Open</a>
+        <a class="button small" href="/fx.html" download="fx.html">Download HTML</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <strong>Mixer + Pan</strong>
+      <p>Receive participant audio, set levels, mute or solo channels, and place each instrument in the stereo field. Remote participants can run a mixer too.</p>
+      <div class="card-actions">
+        <a class="button small" href="/mixer-pan.html">Open mixer</a>
+        <a class="button small" href="/mixer-pan.html" download="mixer-pan.html">Download HTML</a>
+      </div>
+    </div>
   </div>
 
-  <h2>Make your own</h2>
-  <div class="step"><strong>1.</strong> Ask an LLM to make a single-file HTML instrument using the Dissonance API.</div>
-  <div class="step"><strong>2.</strong> Open and test it on your device.</div>
-  <div class="step"><strong>3.</strong> Post the HTML file so everyone in the workshop can open it from the gallery.</div>
+  <h2>Make your own instrument with an LLM</h2>
+  <p class="muted">You do not need to know JavaScript. The safest method is to give the LLM a working Dissonance instrument and ask it to change the musical idea while preserving the workshop plumbing.</p>
+
+  <div class="step"><strong>1. Download a starter.</strong> Use one of the <strong>Download HTML</strong> buttons above. Dissonance is the simplest general starting point; use FX if you want to process somebody else's sound.</div>
+  <div class="step"><strong>2. Give the file to an LLM.</strong> Start a new chat, attach the downloaded <code>.html</code> file, and describe the instrument you want to make.</div>
+  <div class="step"><strong>3. Paste the prompt below.</strong> Replace the bracketed sentence with your own idea. Ask the LLM to return one complete HTML file.</div>
+  <div class="step"><strong>4. Test it.</strong> Open the generated HTML while connected to this Dissonance server. Check that Start sound, send audio, routing controls, and your new musical controls work.</div>
+  <div class="step"><strong>5. Share it.</strong> Go to <a href="/submit.html">Post your instrument</a>, upload the HTML, then find it in the <a href="/gallery.html">gallery</a>.</div>
+
+  <div class="prompt">
+    <div class="prompt-head">
+      <span>Recommended prompt</span>
+      <button class="button small" type="button" onclick="copyPrompt(this)">Copy prompt</button>
+    </div>
+    <pre id="llm-prompt">This HTML file is a working instrument for a collaborative networked music system called Dissonance.
+
+Please transform it into this instrument:
+[DESCRIBE THE INSTRUMENT YOU WANT HERE]
+
+Keep it compatible with the existing Dissonance workshop system. Important rules:
+
+1. Return ONE complete, self-contained HTML file.
+2. Keep these shared scripts and use the existing Dissonance helpers. Do not replace the networking layer:
+   &lt;script src="osc-browser.min.js"&gt;&lt;/script&gt;
+   &lt;script src="dissonance.js"&gt;&lt;/script&gt;
+3. Use audioContext() instead of creating a new AudioContext.
+4. Connect the instrument's final sound to audioOut(), not directly to ctx.destination. This preserves "send audio", "my speakers", and Stop/Resume sound.
+5. Register useful musical controls with param(). This gives them Dissonance routing strips so other participants can send control values to them or receive their values.
+6. For an effect that receives another participant's audio, use audioIn() rather than building a separate streaming system.
+7. For sequencers, clocks, repeating events, or delayed musical actions, use bgInterval(), bgTimeout(), clearBg(), and lookahead() rather than ordinary setInterval()/setTimeout() when practical.
+8. Do not remove the participant name field, connection status, routing UI, send-audio controls, or existing Dissonance infrastructure unless there is a very good reason.
+9. Do not add external libraries, CDNs, build tools, npm dependencies, or extra files. Everything specific to the new instrument should live in this HTML file.
+10. Keep control traffic moderate. Do not send high-rate parameter updates unless musically necessary. For LFOs or continuously generated controllers, use param() with maxHz and epsilon so network control messages are throttled and tiny changes are suppressed. A reasonable starting point is maxHz: 10 and epsilon: 0.01.
+11. Incoming Dissonance control values should change the sound exactly as local control gestures do. Do not create a second disconnected set of controls.
+12. Preserve any working networking/audio code from the starter wherever possible. Make the smallest changes needed to create the new instrument.
+
+Before returning the file, check that all element IDs referenced by JavaScript actually exist and that Start sound can only initialize the audio graph once.
+
+Return only the complete HTML file, ready to save and post to the Dissonance gallery.</pre>
+  </div>
+
+  <h3 style="margin-top:26px">Ideas to try</h3>
+  <div class="ideas">
+    <div class="idea"><strong>Transform a synth</strong>“Turn this into a noisy resonator with three frequency bands, feedback, decay, and excitation controls.”</div>
+    <div class="idea"><strong>Make a controller</strong>“Turn this into four independent LFOs with rate, depth, waveform, and phase controls. The LFO outputs should be routable to other instruments.”</div>
+    <div class="idea"><strong>Make an effect</strong>“Turn this into a strange pitch-and-delay processor that receives another participant's audio and has routable feedback, pitch spacing, and delay controls.”</div>
+    <div class="idea"><strong>Make something unruly</strong>“Make a swarm instrument with 12 unstable oscillators controlled by fundamental pitch, spread, swarm size, and chaos.”</div>
+  </div>
+
+  <div class="note"><strong>If the generated instrument breaks:</strong> give the LLM the last working HTML again and ask it to make a smaller change. The Dissonance networking and audio code is already working, so it is usually better to preserve it than to rewrite it.</div>
 
   <div class="actions">
-    <a class="button" href="/submit.html">Post an instrument</a>
+    <a class="button primary" href="/submit.html">Post an instrument</a>
     <a class="button" href="/gallery.html">Browse workshop instruments</a>
+    <a class="button" href="/mixer-pan.html">Open mixer</a>
   </div>
 
   <footer>
-    Dissonance workshop server · <a href="/mixer.html">Mixer</a>
+    Dissonance workshop server
   </footer>
 </main>
+<script>
+function copyPrompt(button) {
+  const text = document.getElementById('llm-prompt').innerText;
+  navigator.clipboard.writeText(text).then(() => {
+    const old = button.textContent;
+    button.textContent = 'Copied';
+    setTimeout(() => button.textContent = old, 1400);
+  }).catch(() => {
+    window.getSelection().selectAllChildren(document.getElementById('llm-prompt'));
+  });
+}
+</script>
 </body>
 </html>
