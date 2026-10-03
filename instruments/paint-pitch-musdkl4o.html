@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<base href="/">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paint Choir</title>
+<style>
+body{
+  font:15px/1.4 system-ui,sans-serif;
+  max-width:1000px;
+  margin:24px auto;
+  padding:0 16px;
+  background:#111;
+  color:#eee;
+}
+h1{margin:0 0 8px}
+.status{font-size:13px;color:#999;margin-bottom:12px}
+button,input,select{font:inherit}
+.panel{
+  border:1px solid #333;
+  border-radius:8px;
+  padding:12px;
+  margin:12px 0;
+}
+.toolbar{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  align-items:center;
+}
+.colorBtn{
+  width:32px;height:32px;border:2px solid #666;cursor:pointer;
+}
+.colorBtn.active{outline:3px solid #fff}
+canvas{
+  display:block;
+  width:100%;
+  max-width:900px;
+  height:600px;
+  background:#fafafa;
+  touch-action:none;
+  border:1px solid #444;
+}
+#routing{margin-top:12px}
+.row{display:flex;gap:16px;flex-wrap:wrap}
+.row label{flex:1;min-width:180px}
+</style>
+</head>
+<body>
+
+<h1>Paint Choir</h1>
+<div id="status" class="status">not connected</div>
+
+<button id="start">Start sound</button>
+
+<label>My name <input id="name" value="paint-choir"></label>
+
+<div class="panel">
+  <div class="toolbar">
+    <button id="eraser">Eraser</button>
+
+    <button class="colorBtn active" data-color="#ff0000" style="background:#ff0000"></button>
+    <button class="colorBtn" data-color="#00aa00" style="background:#00aa00"></button>
+    <button class="colorBtn" data-color="#0066ff" style="background:#0066ff"></button>
+    <button class="colorBtn" data-color="#ffcc00" style="background:#ffcc00"></button>
+    <button class="colorBtn" data-color="#8000ff" style="background:#8000ff"></button>
+    <button class="colorBtn" data-color="#000000" style="background:#000000"></button>
+    <button class="colorBtn" data-color="#ffffff" style="background:#ffffff;border-color:#bbb"></button>
+
+    <label>
+      Brush
+      <input id="brushSize" type="range" min="2" max="50" value="12">
+    </label>
+
+    <button id="clearCanvas">Clear</button>
+  </div>
+
+  <canvas id="paint" width="900" height="600"></canvas>
+</div>
+
+<div class="row">
+  <label>
+    Master volume
+    <input id="masterVolume" type="range" min="0" max="1" step="0.01" value="0.6">
+  </label>
+
+  <label>
+    Rhythm rate
+    <input id="rhythmRate" type="range" min="1" max="12" step="0.1" value="4">
+  </label>
+</div>
+
+<div id="routing"></div>
+
+<script src="osc-browser.min.js"></script>
+<script src="dissonance.js"></script>
+
+<script>
+const $ = id => document.getElementById(id);
+
+let ctx = null;
+let started = false;
+
+const canvas = $("paint");
+const g = canvas.getContext("2d");
+
+g.fillStyle = "#ffffff";
+g.fillRect(0,0,canvas.width,canvas.height);
+
+let currentColor = "#ff0000";
+let drawing = false;
+let erasing = false;
+let lastX = 0;
+let lastY = 0;
+
+const pitchMap = {
+  "#ff0000":261.63,
+  "#00aa00":329.63,
+  "#0066ff":392.00,
+  "#ffcc00":523.25,
+  "#8000ff":659.25
+};
+
+const oscillators = {};
+const gains = {};
+
+let noiseNode = null;
+let blackAmount = 0;
+let whiteAmount = 0;
+let rhythmTimer = null;
+
+function initAudio(){
+  if(started) return;
+
+  started = true;
+  ctx = audioContext();
+
+  const master = ctx.createGain();
+  master.gain.value = 0.6;
+  master.connect(audioOut({anchor:"auto"}));
+
+  Object.entries(pitchMap).forEach(([color,freq])=>{
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = "sine";
+    osc.frequency.value = freq;
+    gain.gain.value = 0;
+
+    osc.connect(gain).connect(master);
+    osc.start();
+
+    oscillators[color] = osc;
+    gains[color] = gain;
+  });
+
+  const buffer = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+  const d = buffer.getChannelData(0);
+  for(let i=0;i<d.length;i++) d[i] = Math.random()*2-1;
+
+  noiseNode = ctx.createBufferSource();
+  noiseNode.buffer = buffer;
+  noiseNode.loop = true;
+
+  const noiseGain = ctx.createGain();
+  noiseGain.gain.value = 0;
+
+  noiseNode.connect(noiseGain).connect(master);
+  noiseNode.start();
+
+  noiseNode.rhythmGain = noiseGain;
+
+  updateAudioFromCanvas();
+
+  rhythmTimer = bgInterval(updateRhythm, 80);
+}
+
+$("start").onclick = () => {
+  initAudio();
+  ctx.resume();
+};
+
+document.querySelectorAll(".colorBtn").forEach(btn=>{
+  btn.onclick = ()=>{
+    erasing = false;
+    currentColor = btn.dataset.color;
+
+    document.querySelectorAll(".colorBtn").forEach(b=>b.classList.remove("active"));
+    btn.classList.add("active");
+  };
+});
+
+$("eraser").onclick = ()=>{
+  erasing = true;
+  document.querySelectorAll(".colorBtn").forEach(b=>b.classList.remove("active"));
+};
+
+function pos(e){
+  const r = canvas.getBoundingClientRect();
+  return {
+    x:(e.clientX-r.left)*(canvas.width/r.width),
+    y:(e.clientY-r.top)*(canvas.height/r.height)
+  };
+}
+
+canvas.onpointerdown = e=>{
+  if(!ctx) $("start").click();
+
+  drawing = true;
+  const p = pos(e);
+  lastX = p.x;
+  lastY = p.y;
+};
+
+canvas.onpointermove = e=>{
+  if(!drawing) return;
+
+  const p = pos(e);
+
+  g.lineCap = "round";
+  g.lineJoin = "round";
+  g.lineWidth = +$("brushSize").value;
+
+  if(erasing){
+    g.strokeStyle = "#ffffff";
+  } else {
+    g.strokeStyle = currentColor;
+  }
+
+  g.beginPath();
+  g.moveTo(lastX,lastY);
+  g.lineTo(p.x,p.y);
+  g.stroke();
+
+  lastX = p.x;
+  lastY = p.y;
+};
+
+function endDraw(){
+  if(!drawing) return;
+  drawing = false;
+  updateAudioFromCanvas();
+}
+canvas.onpointerup = endDraw;
+canvas.onpointercancel = endDraw;
+canvas.onpointerleave = endDraw;
+
+function analyzeCanvas(){
+  const img = g.getImageData(0,0,canvas.width,canvas.height).data;
+
+  const counts = {
+    "#ff0000":0,
+    "#00aa00":0,
+    "#0066ff":0,
+    "#ffcc00":0,
+    "#8000ff":0
+  };
+
+  blackAmount = 0;
+  whiteAmount = 0;
+
+  const step = 16;
+
+  for(let i=0;i<img.length;i+=4*step){
+    const r = img[i];
+    const gg = img[i+1];
+    const b = img[i+2];
+
+    if(r<40 && gg<40 && b<40){
+      blackAmount++;
+      continue;
+    }
+
+    if(r>230 && gg>230 && b>230){
+      whiteAmount++;
+      continue;
+    }
+
+    if(r>200 && gg<120 && b<120) counts["#ff0000"]++;
+    else if(gg>120 && r<120 && b<120) counts["#00aa00"]++;
+    else if(b>150 && r<120) counts["#0066ff"]++;
+    else if(r>180 && gg>150 && b<120) counts["#ffcc00"]++;
+    else if(r>80 && b>120) counts["#8000ff"]++;
+  }
+
+  return counts;
+}
+
+function updateAudioFromCanvas(){
+  if(!ctx) return;
+
+  const counts = analyzeCanvas();
+  const total = Object.values(counts).reduce((a,b)=>a+b,0) || 1;
+
+  Object.entries(counts).forEach(([color,count])=>{
+    const vol = Math.min(0.25,count/total);
+    gains[color].gain.setTargetAtTime(vol, ctx.currentTime, 0.15);
+  });
+}
+
+function updateRhythm(){
+  if(!ctx || !noiseNode) return;
+
+  const density = Math.min(1,(blackAmount + whiteAmount)/400);
+
+  const rate = +rhythmRateP.value;
+
+  const t = performance.now()/1000;
+
+  const blackPulse = Math.sin(t * rate * Math.PI * 2) > 0.8 ? 1 : 0;
+  const whitePulse = Math.sin(t * rate * 0.618 * Math.PI * 2) > 0.88 ? 1 : 0;
+
+  const amp = density * (blackPulse * 0.8 + whitePulse * 0.5);
+
+  noiseNode.rhythmGain.gain.setTargetAtTime(
+    amp * 0.25,
+    ctx.currentTime,
+    0.03
+  );
+}
+
+$("clearCanvas").onclick = ()=>{
+  g.fillStyle="#ffffff";
+  g.fillRect(0,0,canvas.width,canvas.height);
+  updateAudioFromCanvas();
+};
+
+const masterVolumeP = param("masterVolume",{
+  input:"masterVolume",
+  send:"personal",
+  listen:"",
+  onChange:v=>{
+    if(!ctx) return;
+    const out = document.querySelector("#masterVolume");
+  }
+});
+
+const rhythmRateP = param("rhythmRate",{
+  input:"rhythmRate",
+  send:"personal",
+  listen:"",
+  maxHz:10,
+  epsilon:0.01
+});
+
+param("brushSize",{
+  input:"brushSize",
+  send:"personal",
+  listen:"",
+  maxHz:10,
+  epsilon:0.01
+});
+
+const masterWatcher = bgInterval(()=>{
+  if(!ctx) return;
+
+  const vol = +$("masterVolume").value;
+  const outputs = Object.values(gains);
+
+  outputs.forEach(gain=>{
+    gain.gain.value = Math.min(gain.gain.value, vol);
+  });
+},100);
+
+</script>
+
+</body>
+</html>

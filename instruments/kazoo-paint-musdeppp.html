@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<base href="/">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Painted Kazoo</title>
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; max-width: 800px; margin: 24px auto; padding: 0 16px; background: #111; color: #eee; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .status { font-size: 13px; color: #999; margin-bottom: 16px; }
+  .status.on { color: #6c6; }
+  label { display: block; margin: 12px 0 2px; }
+  input[type=range] { width: 100%; }
+  input[type=color] { cursor: pointer; }
+  button { font: inherit; padding: 8px 14px; margin: 8px 8px 0 0; background: #333; color: #eee; border: 1px solid #555; border-radius: 4px; cursor: pointer; }
+  button.active { background: #4a4; border-color: #6c6; color: #fff; }
+
+  .row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .row > label { flex: 1; min-width: 200px; }
+
+  .panel { margin: 18px 0; padding: 12px; border: 1px solid #333; border-radius: 6px; }
+
+  #canvas { display: block; width: 100%; height: auto; margin: 12px 0; background: #000; border: 1px solid #333; border-radius: 4px; touch-action: none; cursor: crosshair; }
+
+  .controls { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; align-items: center; }
+
+  #faceDisplay { font: 13px ui-monospace, monospace; color: #8a8; margin: 8px 0; padding: 6px; background: #000; border-radius: 3px; min-height: 20px; }
+
+  #routing { margin: 12px 0; }
+</style>
+</head>
+<body>
+<h1>Painted Kazoo</h1>
+<div id="status" class="status">not connected</div>
+
+<button id="start">Start sound</button>
+<label>My name <input id="name" value="kazoo"></label>
+
+<div class="panel">
+  <h2 style="font-size: 14px; margin: 0 0 8px;">Paint a face</h2>
+  <canvas id="canvas" width="640" height="480"></canvas>
+  <div class="controls">
+    <button id="clear">Clear</button>
+    <label>Brush size <input id="brushSize" type="range" min="3" max="40" step="1" value="8"></label>
+    <label>Color <input id="brushColor" type="color" value="#ffffff"></label>
+  </div>
+  <div id="faceDisplay">waiting for paint...</div>
+</div>
+
+<div class="panel">
+  <h3 style="font-size: 13px; margin: 0 0 8px;">Voice</h3>
+  <div class="row">
+    <label>pitch bend (octaves) <input id="bend" type="range" min="-2" max="2" step="0.1" value="0"></label>
+    <label>glide <input id="glide" type="range" min="0" max="1" step="0.01" value="0.3"></label>
+  </div>
+  <div class="row">
+    <label>brightness <input id="brightness" type="range" min="0" max="1" step="0.01" value="0.6"></label>
+    <label>breath <input id="breath" type="range" min="0" max="1" step="0.01" value="0.3"></label>
+  </div>
+</div>
+
+<div id="routing"></div>
+
+<script src="osc-browser.min.js"></script>
+<script src="dissonance.js"></script>
+<script>
+/* =====================================================================
+   INSTRUMENT: kazoo controlled by painted faces
+   Detects face-like regions in a canvas painting and uses their position,
+   size, and brightness to modulate a nasal, reedy voice.
+   ===================================================================== */
+const $ = (id) => document.getElementById(id);
+
+// ---------- painting canvas ----------
+const canvas = $("canvas");
+const ctx2d = canvas.getContext("2d", { willReadFrequently: true });
+ctx2d.fillStyle = "#000";
+ctx2d.fillRect(0, 0, canvas.width, canvas.height);
+
+let isDrawing = false, lastX = 0, lastY = 0;
+
+function drawLine(fromX, fromY, toX, toY) {
+  ctx2d.strokeStyle = $("brushColor").value;
+  ctx2d.lineWidth = $("brushSize").value;
+  ctx2d.lineCap = "round";
+  ctx2d.lineJoin = "round";
+  ctx2d.beginPath();
+  ctx2d.moveTo(fromX, fromY);
+  ctx2d.lineTo(toX, toY);
+  ctx2d.stroke();
+}
+
+canvas.onpointerdown = (e) => {
+  const rect = canvas.getBoundingClientRect();
+  lastX = (e.clientX - rect.left) * (canvas.width / rect.width);
+  lastY = (e.clientY - rect.top) * (canvas.height / rect.height);
+  isDrawing = true;
+  canvas.setPointerCapture(e.pointerId);
+};
+
+canvas.onpointermove = (e) => {
+  if (!isDrawing) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+  const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+  drawLine(lastX, lastY, x, y);
+  lastX = x; lastY = y;
+};
+
+canvas.onpointerup = canvas.onpointercancel = () => { isDrawing = false; };
+
+$("clear").onclick = () => {
+  ctx2d.fillStyle = "#000";
+  ctx2d.fillRect(0, 0, canvas.width, canvas.height);
+  $("faceDisplay").textContent = "cleared";
+};
+
+// ---------- simple face detection: find contiguous bright regions ----------
+function detectFaces() {
+  const w = canvas.width, h = canvas.height;
+  const imgData = ctx2d.getImageData(0, 0, w, h);
+  const data = imgData.data;
+
+  // convert to brightness per pixel (0 = black, 255 = white)
+  const bright = new Uint8Array(w * h);
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i+1], b = data[i+2];
+    bright[i/4] = (r + g + b) / 3;
+  }
+
+  // find regions with painted content (brightness > 30)
+  const visited = new Uint8Array(w * h);
+  const faces = [];
+
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      const idx = py * w + px;
+      if (visited[idx] || bright[idx] < 30) continue;
+
+      // flood fill to find connected region
+      const region = [];
+      const queue = [[px, py]];
+      visited[idx] = 1;
+
+      while (queue.length) {
+        const [x, y] = queue.shift();
+        region.push([x, y]);
+
+        // check 4-neighbors
+        for (const [dx, dy] of [[0,1],[1,0],[0,-1],[-1,0]]) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+          const nidx = ny * w + nx;
+          if (visited[nidx] || bright[nidx] < 30) continue;
+          visited[nidx] = 1;
+          queue.push([nx, ny]);
+        }
+      }
+
+      // only consider regions larger than ~100 pixels (face-sized)
+      if (region.length < 100) continue;
+
+      // compute centroid, size, and brightness
+      let cx = 0, cy = 0, avgBright = 0;
+      for (const [x, y] of region) {
+        cx += x; cy += y;
+        avgBright += bright[y * w + x];
+      }
+      cx /= region.length; cy /= region.length;
+      avgBright /= region.length;
+
+      const radius = Math.sqrt(region.length / Math.PI);
+      faces.push({ cx, cy, radius, avgBright, size: region.length });
+    }
+  }
+
+  // merge overlapping faces
+  const merged = [];
+  for (const f of faces) {
+    let found = false;
+    for (const m of merged) {
+      const dist = Math.hypot(f.cx - m.cx, f.cy - m.cy);
+      if (dist < Math.max(f.radius, m.radius)) {
+        m.cx = (m.cx * m.size + f.cx * f.size) / (m.size + f.size);
+        m.cy = (m.cy * m.size + f.cy * f.size) / (m.size + f.size);
+        m.avgBright = (m.avgBright * m.size + f.avgBright * f.size) / (m.size + f.size);
+        m.size += f.size;
+        m.radius = Math.sqrt(m.size / Math.PI);
+        found = true;
+        break;
+      }
+    }
+    if (!found) merged.push(f);
+  }
+
+  return merged;
+}
+
+// ---------- audio: nasal kazoo voice ----------
+let ctx, osc1, osc2, filter, amp, noiseAmp, noise, vibrato, vibratoGain, master;
+
+function initAudio() {
+  ctx = audioContext();
+  master = ctx.createDynamicsCompressor();
+  const out = ctx.createGain(); out.gain.value = 0.6;
+  master.connect(out).connect(audioOut({ anchor: "auto" }));
+
+  // main tone: two oscillators
+  osc1 = ctx.createOscillator();
+  osc1.type = "sawtooth";
+  osc2 = ctx.createOscillator();
+  osc2.type = "triangle";
+  const osc2Gain = ctx.createGain(); osc2Gain.gain.value = 0.3;
+
+  // filter for nasal resonance (peak around 1kHz)
+  filter = ctx.createBiquadFilter();
+  filter.type = "peaking";
+  filter.frequency.value = 1200;
+  filter.Q.value = 3;
+  filter.gain.value = 12;
+
+  // breath noise
+  const noiseBuffer = ctx.createBuffer(1, ctx.sampleRate / 10, ctx.sampleRate);
+  const noiseData = noiseBuffer.getChannelData(0);
+  for (let i = 0; i < noiseData.length; i++) {
+    noiseData[i] = Math.random() * 2 - 1;
+  }
+  const noiseSource = ctx.createBufferSource();
+  noiseSource.buffer = noiseBuffer;
+  noiseSource.loop = true;
+  noiseAmp = ctx.createGain();
+  noiseAmp.gain.value = 0;
+  noiseSource.connect(noiseAmp);
+  noiseSource.start();
+
+  // vibrato (slow LFO)
+  vibrato = ctx.createOscillator();
+  vibrato.frequency.value = 4.5;
+  vibratoGain = ctx.createGain();
+  vibratoGain.gain.value = 0;
+  vibrato.connect(vibratoGain);
+
+  // routing
+  osc1.connect(filter);
+  osc2.connect(osc2Gain).connect(filter);
+  noiseAmp.connect(filter);
+  amp = ctx.createGain(); amp.gain.value = 0;
+  filter.connect(amp).connect(master);
+  vibratoGain.connect(osc1.frequency);
+  vibratoGain.connect(osc2.frequency);
+
+  for (const o of [osc1, osc2, vibrato]) o.start();
+}
+
+function voiceSet(t, freq) {
+  const gl = 0.008 + glideP.value * 0.15;
+  osc1.frequency.setTargetAtTime(freq, t, gl / 3);
+  osc2.frequency.setTargetAtTime(freq * 1.001, t, gl / 3);
+
+  // nasal filter tuning based on brightness
+  const bright = brightnessP.value;
+  filter.frequency.setTargetAtTime(800 + bright * 2000, t, 0.05);
+  filter.gain.setTargetAtTime(6 + bright * 8, t, 0.05);
+
+  // vibrato depth
+  vibratoGain.gain.setTargetAtTime(freq * 0.01 * (0.3 + bright * 0.7), t, 0.1);
+
+  // breath noise
+  noiseAmp.gain.setTargetAtTime(breathP.value * 0.15, t, 0.05);
+
+  amp.gain.setTargetAtTime(0.4, t, 0.04);
+}
+
+function voiceOff(t) {
+  if (ctx) amp.gain.setTargetAtTime(0, t, 0.08);
+}
+
+// ---------- base pitch and face response ----------
+const baseFreq = 110;  // A2, classic kazoo range
+let lastFaceCount = 0, lastFaceFreq = 0, touchTimer = null;
+
+function updateFromFaces() {
+  const faces = detectFaces();
+
+  if (faces.length === 0) {
+    $("faceDisplay").textContent = "painted on canvas to play";
+    voiceOff(ctx?.currentTime || 0);
+    lastFaceCount = 0;
+    return;
+  }
+
+  // sort by size; use largest as primary
+  faces.sort((a, b) => b.size - a.size);
+  const primary = faces[0];
+
+  // pitch from horizontal position (left = lower, right = higher)
+  const xRatio = primary.cx / canvas.width;
+  const pitchShift = Math.pow(2, bendP.value + xRatio * 1.5 - 0.75);  // ±octave + position
+  const freq = baseFreq * pitchShift;
+
+  // display detected faces
+  let txt = `${faces.length} face${faces.length !== 1 ? "s" : ""} • `;
+  txt += `freq: ${freq.toFixed(0)}Hz • `;
+  txt += `size: ${(primary.radius * 2).toFixed(0)}px`;
+  $("faceDisplay").textContent = txt;
+
+  if (!ctx) $("start").click();
+  if (ctx && freq !== lastFaceFreq) {
+    voiceSet(ctx.currentTime, freq);
+    lastFaceFreq = freq;
+  }
+}
+
+// analysis loop
+bgInterval(() => { if (ctx) updateFromFaces(); }, 100);
+
+// ---------- params ----------
+const bendP     = param("bend",      { input: "bend",      send: "personal", listen: "" });
+const glideP    = param("glide",     { input: "glide",     send: "personal", listen: "" });
+const brightnessP = param("brightness", { input: "brightness", send: "personal", listen: "" });
+const breathP   = param("breath",    { input: "breath",    send: "personal", listen: "" });
+
+$("start").onclick = () => {
+  if (!ctx) initAudio();
+  ctx.resume();
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+<base href="/">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the fly (dissonance)</title>
+<!--
+  The fly's instrument for Alex's Dissonance relay (vendor/dissonance-osc-3). One self-contained file, no external fonts or CDNs.
+  Post it through the relay's submit.html (title "the fly (dissonance)", author "craitr"); the relay stores it under /instruments/
+  and injects a base tag pointing at "/" (server.js: only when the file has no base tag of its own, so this file must never
+  spell one, not even in a comment), so osc-browser.min.js, dissonance.js and audio-worklet.js resolve to the relay root.
+  Every door URL below is absolute (DOOR = ?door= or https://dissonance.craitr.no).
+  SPEC-W1 §4.3 · DESIGN v2 §7.4, §10 · CONTRACT v1 §4. Front-end Neko (SCREENS builder), 2 Oct 2026.
+
+  What it does: plays the room's mix (stream.mp3 + every entered arrival, settings.landing applied) through a compressor into
+  audioOut(); keeps the pantry in Cache Storage as the power-cut floor; sends the fly's state as OSC under /player/fly/*.
+  Nothing from the room steers it unless someone picks an address in Alex's routing strip (listen: "" on every param).
+
+  Choices (all ours unless cited):
+  - density / brightness / pulse are registered as the template asks, with listen "" and send "personal" (/player/fly/...), so
+    moving our sliders never lands on /shared/* where every other instrument listens by default.
+  - triggers are sent as value 1, then 0 after 100 ms (v2 §7.4). A trigger param on another page that listens to one of them
+    fires on both messages; a value param sees a 100 ms gate.
+-->
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; max-width: 640px; margin: 24px auto; padding: 0 16px; background: #0b0c10; color: #eee; }
+  h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: .02em; }
+  .status { font-size: 13px; color: #999; margin-bottom: 4px; }
+  .status.on { color: #6c6; }
+  #hostline { font: 12px/1.5 ui-monospace, monospace; color: #bbb; margin: 0 0 10px; white-space: pre-wrap; }
+  #hostline.bad { color: #ff9a7a; }
+  #note { font-size: 13px; color: #ffb347; min-height: 1.2em; margin-bottom: 8px; }
+  label { display: block; margin: 12px 0 2px; }
+  input[type=range] { width: 100%; }
+  input[type=text] { background: #1a1a1a; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 4px 6px; }
+  button { font: inherit; padding: 8px 14px; margin: 8px 8px 0 0; background: #333; color: #eee; border: 1px solid #555; border-radius: 4px; cursor: pointer; }
+  #mute { font-weight: 700; font-size: 18px; padding: 12px 26px; background: #3a1f1f; border-color: #a55; }
+  #mute.muted { background: #a33; color: #fff; }
+  .meter { height: 6px; background: #222; border-radius: 3px; overflow: hidden; margin-top: 6px; }
+  .meter i { display: block; height: 100%; width: 0; background: #ffb347; transition: width .1s linear; }
+  #log { margin-top: 20px; font: 12px/1.3 ui-monospace, monospace; color: #8a8; height: 140px; overflow: auto; background: #000; padding: 8px; border-radius: 4px; white-space: pre; }
+  a { color: #9cf; }
+</style>
+</head>
+<body>
+<h1>the fly (dissonance)</h1>
+<div style="margin:6px 0 14px"><a href="/gallery.html" style="margin-right:14px">Instrument gallery</a><a href="/submit.html">Post an instrument</a></div>
+<div id="status" class="status">not connected</div>
+<div id="hostline">door … · relay … · fly — · stream — · pantry 0/17</div>
+<div id="note"></div>
+
+<button id="start">Start sound</button>
+<button id="mute" type="button" aria-pressed="false">MUTE</button>
+<div class="meter" aria-hidden="true"><i id="lvl"></i></div>
+<label>My name <input id="name" type="text" value="fly" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></label>
+
+<label>density (arrivals against the stream) <input id="density" type="range" min="0" max="1" step="0.001" value="0.8"></label>
+<label>brightness (output lowpass) <input id="brightness" type="range" min="0" max="1" step="0.001" value="1"></label>
+<button id="pulse">pulse (welcome the oldest arrival)</button>
+
+<div id="routing"></div>
+<div id="log"></div>
+
+<script src="osc-browser.min.js"></script>
+<script src="dissonance.js"></script>
+<script>
+"use strict";
+(function () {
+  const q = new URLSearchParams(location.search);
+  // W1 review: ?door= is allow-listed (the room's door, a loopback door, an https *.trycloudflare.com rehearsal tunnel) [ours];
+  // anything else only with ?debug=1, and then the host line says where the sound comes from.
+  const HOME = "https://dissonance.craitr.no";
+  function doorAllowed(u) {
+    try { const x = new URL(u); return x.origin === HOME || /^(localhost|127\.0\.0\.1|\[::1\])$/.test(x.hostname) || (x.protocol === "https:" && /\.trycloudflare\.com$/.test(x.hostname)); }
+    catch (_) { return false; }
+  }
+  const ASKED = q.get("door");
+  const DOOR = (ASKED && (doorAllowed(ASKED) || q.get("debug") === "1") ? ASKED : HOME).replace(/\/$/, "");
+  const DOOR_FOREIGN = !doorAllowed(DOOR);
+  const ROOM = "vaasa";
+  const SEAT = "voice-fly-" + Math.random().toString(36).slice(2, 10);
+  const PANTRY_CACHE = "dissonance-pantry-v1";
+  const $ = (id) => document.getElementById(id);
+  const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+  const isNum = (x) => typeof x === "number" && isFinite(x);
+  const durl = (path, params) => { const u = new URL(DOOR + path); u.searchParams.set("room", ROOM); for (const k in (params || {})) u.searchParams.set(k, params[k]); return u.toString(); };
+  function note(s) { $("note").textContent = s || ""; }
+  function log(s) { const el = $("log"); el.textContent = "· " + s + "\n" + el.textContent.slice(0, 4000); }   // text only, never HTML
+
+  // ---------------------------------------------------------------- state
+  const S = { jobs: new Map(), landing: "duck", alpha: 0.5, streamSource: "—", lastFly: 0, lastAlive: performance.now(), sseOpen: false,
+              unreachable: false, arm: "rule", state: "stopped", pantry: [], cached: 0, seen: new Set(), playing: 0 };
+  let ctx = null, G = null;
+
+  // ---------------------------------------------------------------- the template's params (listen "" = nothing from the room steers us)
+  const density = param("density", { input: "density", listen: "", send: "personal", onChange: (v) => { if (G) G.arrivals.gain.setTargetAtTime(0.4 + 0.6 * v, ctx.currentTime, 0.05); } });   // 0.4–1.0 [ours]
+  const brightness = param("brightness", { input: "brightness", listen: "", send: "personal", onChange: (v) => { if (G) G.lp.frequency.setTargetAtTime(800 * Math.pow(18000 / 800, v), ctx.currentTime, 0.05); } });   // 800 Hz–18 kHz [ours]
+  param("pulse", { input: "pulse", kind: "trigger", listen: "", send: "personal", onChange: welcomeOldest });   // CONTRACT §4's proposal, Enek's call [ours]
+
+  // ---------------------------------------------------------------- outputs: /player/fly/<id>, 0–1, ≤ 5/s, only on a change > 0.01
+  const OUTS = {}, last = {}, lastT = {};
+  for (const k of ["blend", "turn", "arousal", "lane", "arm", "unreachable"]) OUTS[k] = param(k, { kind: "out", send: "personal" });
+  const TRIG = {};
+  for (const k of ["arrival", "escape", "back_up", "freeze", "feed", "groom", "threaten", "sing", "seam", "reset"]) TRIG[k] = param(k, { kind: "out", send: "personal" });
+  // until Alex's socket is open (#status gets class "on"), the newest value waits and is sent on connect (the relay keeps it for late joiners)
+  const pending = {};
+  const relayUp = () => $("status").classList.contains("on");
+  function out(k, v, force) {
+    if (!isNum(v)) return;
+    v = clamp(v, 0, 1);
+    if (!relayUp()) { pending[k] = v; return; }
+    const t = performance.now();
+    if (!force && last[k] !== undefined && (Math.abs(v - last[k]) <= 0.01 || t - (lastT[k] || 0) < 200)) { if (Math.abs(v - last[k]) > 0.01) pending[k] = v; return; }
+    last[k] = v; lastT[k] = t; delete pending[k]; OUTS[k].emit(v);
+  }
+  setInterval(() => { if (relayUp()) for (const k of Object.keys(pending)) out(k, pending[k], true); }, 250);   // ≤ 4/s per address
+  function trig(k) { if (!TRIG[k] || !relayUp()) return; TRIG[k].emit(1); setTimeout(() => TRIG[k].emit(0), 100); }
+  const ARM_V = { rule: 0, none: 0.33, wired: 0.5, shuffled: 1 };   // SPEC §4.3
+
+  // ---------------------------------------------------------------- the door: hello, then the room SSE
+  // who "" (W1 review): a label like "the fly's voice" landed in the door's name list and scrubbed "fly" and "voice" from LLM asks
+  fetch(durl("/api/room/hello"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ seat: SEAT, who: "", role: "voice" }) }).catch(() => {});
+  // ONE EventSource and ONE reconnect timer (W1 review: after an outage a second stream stayed open and every arrival played twice)
+  let es = null, reopenTimer = null, lastSSE = performance.now(), lastFlyNow = null;
+  function openSSE() {
+    clearTimeout(reopenTimer); reopenTimer = null;
+    if (es) { try { es.close(); } catch (_) {} }
+    const me = es = new EventSource(durl("/api/room/events", { seat: SEAT }));
+    lastSSE = performance.now();
+    me.onopen = () => { if (me !== es) return; S.sseOpen = true; lastSSE = performance.now(); alive(); };
+    me.onerror = () => {
+      if (me !== es) return;
+      S.sseOpen = false;
+      if (me.readyState === EventSource.CLOSED && !reopenTimer) reopenTimer = setTimeout(openSSE, 3000);
+    };
+    const on = (name, fn) => me.addEventListener(name, (e) => { if (me !== es) return; let d; try { d = JSON.parse(e.data); } catch (_) { return; } lastSSE = performance.now(); alive(); fn(d); });
+    on("hello", (d) => {
+      if (d.settings && d.settings.landing) S.landing = d.settings.landing;
+      if (d.stream) streamState(d.stream);
+      S.jobs.clear(); for (const j of (d.wall || [])) S.jobs.set(j.job, j);
+      laneOut();
+    });
+    on("fly", (d) => {
+      S.lastFly = performance.now(); if (isNum(d.now)) lastFlyNow = d.now;
+      if (isNum(d.turn)) out("turn", (d.turn + 1) / 2);
+      if (isNum(d.arousal)) out("arousal", d.arousal);
+      const a = d.arm_effective || d.arm; if (a && a in ARM_V) { S.arm = a; out("arm", ARM_V[a]); }
+      if (d.state === "reset" && S.state !== "reset") trig("reset");
+      S.state = d.state || S.state;
+      for (const ev of (d.events || [])) {
+        if (!ev || !ev.id || S.seen.has(ev.id)) continue;
+        S.seen.add(ev.id); if (S.seen.size > 500) S.seen.delete(S.seen.values().next().value);
+        if (TRIG[ev.row]) { trig(ev.row); log("fly: " + ev.row + (ev.rule ? " (" + ev.rule + ")" : "")); }
+      }
+    });
+    on("fly_slow", (d) => { if (d.mood && isNum(d.mood.arousal)) out("arousal", d.mood.arousal); });
+    on("stream", streamState);
+    on("settings", (d) => { if (d.settings && d.settings.landing) S.landing = d.settings.landing; });
+    on("job", (d) => { if (d.job && d.job.job) { S.jobs.set(d.job.job, d.job); laneOut(); } });
+    on("lane", laneOut); on("refused", laneOut); on("deferred", laneOut);
+    on("entered", (d) => {
+      laneOut();
+      // a replayed arrival (Last-Event-ID after a blip) more than ~10 s older than the latest live fly event is not played (W1 review) [ours]
+      if (isNum(d.now) && lastFlyNow !== null && lastFlyNow - d.now > 10) { log("arrival skipped (replayed, " + (lastFlyNow - d.now).toFixed(0) + " s old)"); return; }
+      trig("arrival"); if (d.url) arrive(d.url, d.job);
+    });
+    on("seam", (d) => { trig("seam"); log("seam: " + (d.what || "") + " " + (d.from ?? "") + " → " + (d.to ?? "")); });
+  }
+  openSSE();
+  function streamState(s) { if (!s) return; if (isNum(s.alpha)) { S.alpha = s.alpha; out("blend", s.alpha); if (G && S.unreachable) bedsBlend(); } if (s.source) S.streamSource = s.source; }
+  function laneJobs() { return [...S.jobs.values()].filter((j) => j.fate === "lane").sort((a, b) => (a.arrived_t || a.asked_t || 0) - (b.arrived_t || b.asked_t || 0)); }
+  function laneOut() { out("lane", laneJobs().length / 8); }
+  function welcomeOldest() {
+    const j = laneJobs()[0];
+    if (!j) { log("pulse: the lane is empty"); return; }
+    fetch(durl("/api/lane/" + encodeURIComponent(j.job) + "/welcome"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ seat: SEAT, who: "the room's pulse" }) })
+      .then((r) => log("pulse: welcomed " + j.job + " (" + r.status + ")")).catch(() => log("pulse: the door didn't answer"));
+  }
+
+  // ---------------------------------------------------------------- reachability: SSE silent + /api/health failing for 10 s → prepared sounds
+  // W1 review: alive() is fed by SSE messages only. Health is kept apart: a door that answers /api/health while our stream has gone
+  // silent (half-open) gets the stream reopened after 5 s without a fly event, instead of a host line saying "door ✓" forever.
+  function alive() { S.lastAlive = performance.now(); if (S.unreachable) recover(); }
+  setInterval(() => {
+    fetch(durl("/api/health"), { cache: "no-store" }).then((r) => { S.healthOK = r.ok; if (r.ok) S.lastHealth = performance.now(); }).catch(() => { S.healthOK = false; });
+    const now = performance.now();
+    if (S.healthOK && now - lastSSE > 5000 && !reopenTimer) { log("the door answers but the room stream is silent: reopening it"); openSSE(); }
+    const lastAny = Math.max(S.lastAlive, S.lastHealth || 0);
+    if (!S.unreachable && now - lastAny > 10000) goPrepared();
+    if (S.unreachable && S.healthOK) recover();
+    paint();
+  }, 2000);
+
+  // ---------------------------------------------------------------- sound: stream + arrivals → lowpass → compressor → master (MUTE) → audioOut()
+  $("start").addEventListener("click", start);
+  function start() {
+    if (G) { ctx.resume(); return; }
+    ctx = audioContext();
+    G = {};
+    G.mix = ctx.createGain();
+    G.lp = ctx.createBiquadFilter(); G.lp.type = "lowpass"; G.lp.frequency.value = 800 * Math.pow(18000 / 800, +brightness.value); G.lp.Q.value = 0.5;
+    // a compressor, not a brickwall (v2 §7.4): threshold −6 dB, ratio 20, attack 1 ms, release 250 ms. The real mute is the operator's fader.
+    G.comp = ctx.createDynamicsCompressor(); G.comp.threshold.value = -6; G.comp.knee.value = 0; G.comp.ratio.value = 20; G.comp.attack.value = 0.001; G.comp.release.value = 0.25;
+    G.master = ctx.createGain(); G.master.gain.value = muted ? 0 : 1;
+    G.meter = ctx.createAnalyser(); G.meter.fftSize = 512;
+    G.mix.connect(G.lp).connect(G.comp).connect(G.master); G.master.connect(G.meter); G.master.connect(audioOut());
+    G.stream = ctx.createGain(); G.stream.connect(G.mix);
+    G.arrivals = ctx.createGain(); G.arrivals.gain.value = 0.4 + 0.6 * +density.value; G.arrivals.connect(G.mix);
+    G.beds = ctx.createGain(); G.beds.gain.value = 0; G.beds.connect(G.mix);
+    G.floor = ctx.createGain(); G.floor.gain.value = 0; G.floor.connect(G.mix);     // 3 Oct: the quiet floor (see floorLoop)
+    G.sMeter = ctx.createAnalyser(); G.sMeter.fftSize = 2048;
+    G.el = new Audio(); G.el.crossOrigin = "anonymous"; G.el.preload = "auto";
+    G.src = ctx.createMediaElementSource(G.el); G.src.connect(G.stream); G.src.connect(G.sMeter);
+    G.el.addEventListener("error", () => { if (!S.unreachable) setTimeout(playStream, 3000); });
+    G.el.addEventListener("ended", () => { if (!S.unreachable) setTimeout(playStream, 1000); });
+    playStream();
+    log("sound started: stream " + DOOR);
+    cachePantry();
+    meterLoop();
+    floorLoop();
+    if (S.unreachable) { G.stream.gain.value = 0; try { G.el.pause(); } catch (_) {} startBeds(); }   // W1 review: Start pressed during an outage
+  }
+  // ---------------------------------------------------------------- the quiet floor [ours, 3 Oct sound test]
+  // MRT2 sometimes goes near-silent by itself (two 60 s captures: up to 20 s at -91 dB, delivery clean). When the stream
+  // stays under -45 dBFS for 4 s, the pantry's two seamless drone beds fade in under it (crossfaded by the blend, like the
+  // outage beds); when the stream is back above -38 dBFS for 1.5 s they fade out. Labelled "floor" on the host line.
+  let floorNodes = [], floorOn = false, floorLoading = false, quietMs = 0, loudMs = 0;
+  async function floorStart() {
+    if (floorNodes.length || floorLoading || !self.caches) return;
+    floorLoading = true;
+    try {
+      const c = await caches.open(PANTRY_CACHE);
+      const drones = (await cachedList()).filter((u) => /drone-[ab]\.wav$/.test(u)).sort().slice(0, 2);
+      for (const u of drones) {
+        try { const r = await c.match(u); const buf = await ctx.decodeAudioData(await r.arrayBuffer());
+              const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true; const g = ctx.createGain(); g.gain.value = 0.5;
+              src.connect(g).connect(G.floor); src.start(); floorNodes.push({ src, g }); } catch (_) {}
+      }
+    } finally { floorLoading = false; }
+  }
+  function floorBlend() { if (floorNodes[0]) floorNodes[0].g.gain.setTargetAtTime(1 - S.alpha, ctx.currentTime, 0.8); if (floorNodes[1]) floorNodes[1].g.gain.setTargetAtTime(S.alpha, ctx.currentTime, 0.8); }
+  function floorLoop() {
+    const b = new Float32Array(G.sMeter.fftSize);
+    setInterval(() => {
+      if (!G || S.unreachable) return;
+      G.sMeter.getFloatTimeDomainData(b); let e = 0; for (const x of b) e += x * x;
+      const db = 10 * Math.log10(e / b.length + 1e-12);
+      if (db < -45) { quietMs += 250; loudMs = 0; } else if (db > -38) { loudMs += 250; quietMs = 0; }
+      if (!floorOn && quietMs >= 4000) {
+        floorOn = true; log("the stream went quiet: the floor fades in (pantry drones)"); floorStart().then(() => { floorBlend(); G.floor.gain.setTargetAtTime(0.55, ctx.currentTime, 0.7); });
+      } else if (floorOn && loudMs >= 1500) {
+        floorOn = false; log("the stream is back: the floor fades out"); G.floor.gain.setTargetAtTime(0, ctx.currentTime, 1.0);
+      } else if (floorOn) floorBlend();
+      paint();
+    }, 250);
+  }
+  function playStream() { if (!G) return; G.el.src = durl("/api/stream.mp3", { seat: SEAT, n: Date.now() }); G.el.play().catch(() => {}); }
+  let muted = false;
+  $("mute").addEventListener("click", () => {
+    muted = !muted; $("mute").classList.toggle("muted", muted); $("mute").setAttribute("aria-pressed", String(muted));
+    $("mute").textContent = muted ? "MUTED" : "MUTE";
+    if (G) G.master.gain.setTargetAtTime(muted ? 0 : 1, ctx.currentTime, 0.02);
+  });
+  function meterLoop() {
+    const b = new Float32Array(G.meter.fftSize);
+    const tick = () => { G.meter.getFloatTimeDomainData(b); let p = 0; for (const x of b) p = Math.max(p, Math.abs(x)); $("lvl").style.width = (clamp(p, 0, 1) * 100).toFixed(0) + "%"; requestAnimationFrame(tick); };
+    tick();
+  }
+
+  async function bufferFor(u) {                  // Cache Storage first for pantry URLs; else the door
+    const full = DOOR + u.split("?")[0];
+    let resp = null;
+    if (self.caches && /\/api\/pantry\//.test(u)) { try { const c = await caches.open(PANTRY_CACHE); resp = await c.match(full); } catch (_) {} }
+    if (!resp) resp = await fetch(full);
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    return ctx.decodeAudioData(await resp.arrayBuffer());
+  }
+  function landingStart() {                     // settings.landing: duck → the stream to 0.35 while an arrival plays · stop → 0 · on → unchanged (0.2 s ramps)
+    if (S.landing === "on" || S.unreachable) return;
+    G.stream.gain.setTargetAtTime(S.landing === "stop" ? 0 : 0.35, ctx.currentTime, 0.2 / 3);
+  }
+  function landingEnd() { if (S.playing === 0 && !S.unreachable) G.stream.gain.setTargetAtTime(1, ctx.currentTime, 0.2 / 3); }
+  async function arrive(u, job) {
+    if (!G) return;
+    try {
+      const buf = await bufferFor(u);
+      const s = ctx.createBufferSource(); s.buffer = buf; s.connect(G.arrivals);
+      S.playing++; landingStart();
+      s.onended = () => { S.playing = Math.max(0, S.playing - 1); landingEnd(); };
+      s.start();
+      log("arrival: " + (job || u) + " (" + buf.duration.toFixed(1) + " s)");
+    } catch (e) { log("arrival failed: " + (job || u) + " " + (e && e.message)); }
+  }
+
+  // ---------------------------------------------------------------- the power-cut floor: the pantry in Cache Storage (~77 MB, 17 files)
+  let caching = false;
+  async function cachePantry() {
+    if (caching) return; caching = true;
+    try {
+      const list = await (await fetch(durl("/api/pantry"), { cache: "no-store" })).json();
+      S.pantry = Array.isArray(list) ? list : [];
+      if (!self.caches) { log("pantry: no Cache Storage here (needs https or localhost)"); return; }
+      const c = await caches.open(PANTRY_CACHE);
+      let n = 0;
+      for (const it of S.pantry) {                // one at a time, while idle
+        const full = DOOR + it.url;
+        if (!(await c.match(full))) {
+          await new Promise((r) => setTimeout(r, 60));
+          try { const r = await fetch(full); if (r.ok) await c.put(full, r); } catch (_) {}
+        }
+        if (await c.match(full)) n++;
+        S.cached = n; paint();
+      }
+      log("pantry: " + n + "/" + S.pantry.length + " cached");
+    } catch (e) { log("pantry: the door didn't list it (" + (e && e.message) + ")"); }
+    finally { caching = false; }
+  }
+  async function cachedList() {
+    if (!self.caches) return [];
+    try { const c = await caches.open(PANTRY_CACHE); return (await c.keys()).map((r) => r.url); } catch (_) { return []; }
+  }
+  cachePantry();
+  // the count on load comes from the cache itself, so a reload during an outage shows 17/17, not 0/17 (W1 review)
+  cachedList().then((u) => { if (!S.cached) { S.cached = u.length; paint(); } });
+
+  // ---------------------------------------------------------------- unreachable → prepared sounds; back to the stream when the door answers
+  let bedNodes = [], clipTimer = null, bedsStarting = false;
+  async function goPrepared() {
+    if (S.unreachable) return;
+    S.unreachable = true; out("unreachable", 1, true);
+    note("Oslo is unreachable: prepared sounds");
+    log("the door is unreachable for 10 s: prepared sounds");
+    if (!G) return;                                // no sound yet: start() calls startBeds() when Start is pressed
+    G.stream.gain.setTargetAtTime(0, ctx.currentTime, 0.1);
+    try { G.el.pause(); } catch (_) {}
+    startBeds();
+  }
+  async function startBeds() {                     // idempotent: the drones and the clip timer exist once (W1 review)
+    if (!G || bedNodes.length || bedsStarting || !S.unreachable) return;
+    bedsStarting = true;
+    try {
+      const urls = await cachedList();
+      const drones = urls.filter((u) => /drone-[ab]\.wav$/.test(u)).sort();
+      const c = self.caches ? await caches.open(PANTRY_CACHE) : null;
+      for (const u of (c ? drones.slice(0, 2) : [])) {
+        try {
+          const r = await c.match(u); const buf = await ctx.decodeAudioData(await r.arrayBuffer());
+          const s = ctx.createBufferSource(); s.buffer = buf; s.loop = true; const g = ctx.createGain(); g.gain.value = 0;
+          s.connect(g).connect(G.beds); s.start(); bedNodes.push({ s, g });
+        } catch (_) {}
+      }
+      if (!S.unreachable) { recoverBeds(); return; }
+      G.beds.gain.setTargetAtTime(1, ctx.currentTime, 0.5);
+      bedsBlend();
+      const clips = urls.filter((u) => /\/clip-[^/]+\.wav$/.test(u));
+      clearTimeout(clipTimer);
+      const next = () => { clipTimer = setTimeout(() => { if (!S.unreachable) return; if (clips.length) arrive(clips[Math.floor(Math.random() * clips.length)].slice(DOOR.length)); next(); }, 30000 + Math.random() * 30000); };
+      next();
+    } finally { bedsStarting = false; }
+  }
+  function recoverBeds() {
+    clearTimeout(clipTimer);
+    if (!G) return;
+    G.beds.gain.setTargetAtTime(0, ctx.currentTime, 0.5);
+    const old = bedNodes; bedNodes = [];
+    setTimeout(() => old.forEach(({ s }) => { try { s.stop(); } catch (_) {} }), 2500);
+  }
+  function bedsBlend() {                         // crossfaded by the last blend (corner A ↔ B)
+    if (!bedNodes.length) return;
+    const a = S.alpha;
+    if (bedNodes[0]) bedNodes[0].g.gain.setTargetAtTime(1 - a, ctx.currentTime, 0.5);
+    if (bedNodes[1]) bedNodes[1].g.gain.setTargetAtTime(a, ctx.currentTime, 0.5);
+  }
+  function recover() {
+    S.unreachable = false; out("unreachable", 0, true); note("");
+    log("the door answers again: back to the stream");
+    recoverBeds();
+    if (S.openAgain !== false && (!es || es.readyState === EventSource.CLOSED) && !reopenTimer) openSSE();
+    if (!G) return;
+    G.stream.gain.setTargetAtTime(1, ctx.currentTime, 0.3);
+    playStream();
+  }
+
+  // ---------------------------------------------------------------- the host status line
+  function paint() {
+    const relay = $("status").classList.contains("on");
+    const flyAge = S.lastFly ? ((performance.now() - S.lastFly) / 1000).toFixed(1) + " s ago" : "—";
+    let src = S.unreachable ? "prepared (cached)" : S.streamSource;
+    if (G && !S.unreachable && G.el.paused) src += " (silent here)";
+    const doorOK = !S.unreachable && (S.sseOpen || S.healthOK);
+    const line = (DOOR_FOREIGN ? "debug door " + DOOR + " · " : "") + (doorOK ? "door ✓" : "door ✗") + " · relay " + (relay ? "✓" : "✗") + " · last fly event " + flyAge + " · stream " + src +
+                 " · pantry cached " + S.cached + "/" + (S.pantry.length || 17) + " · arm " + S.arm + (typeof floorOn !== "undefined" && floorOn ? " · floor (prepared drones under a quiet stream)" : "");
+    const h = $("hostline"); h.textContent = line; h.classList.toggle("bad", !doorOK);
+    if (window.__w1fly) Object.assign(window.__w1fly, { unreachable: S.unreachable, cached: S.cached, door: doorOK, relay, last: { ...last } });
+  }
+  if (q.get("debug") === "1") window.__w1fly = {};
+  setInterval(paint, 1000);
+})();
+</script>
+</body>
+</html>

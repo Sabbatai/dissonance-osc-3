@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<base href="/">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Evolving Painting & Tweeting Birds</title>
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; max-width: 760px; margin: 24px auto; padding: 0 16px; background: #0e1117; color: #eee; }
+  h1 { font-size: 20px; margin: 0 0 4px; color: #7cf; }
+  .status { font-size: 13px; color: #888; margin-bottom: 16px; }
+  .status.on { color: #6c6; }
+  label { display: block; margin: 10px 0 2px; }
+  input[type=range] { width: 100%; accent-color: #59d; }
+  button { font: inherit; padding: 8px 14px; margin: 8px 8px 0 0; background: #222c36; color: #eee; border: 1px solid #445566; border-radius: 4px; cursor: pointer; }
+  button:hover { background: #334455; }
+  button.active { background: #2a6644; border-color: #4d9; color: #fff; }
+  #log { margin-top: 20px; font: 12px/1.3 ui-monospace, monospace; color: #8a8; height: 100px; overflow: auto; background: #05080c; padding: 8px; border-radius: 4px; white-space: pre; border: 1px solid #1a2633; }
+  .row { display: flex; gap: 16px; }
+  .row > label { flex: 1; min-width: 0; }
+  .panel { margin: 16px 0; padding: 12px; border: 1px solid #223344; border-radius: 8px; background: #131922; }
+
+  /* Canvas styling */
+  #canvas-container { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 6px; overflow: hidden; border: 1px solid #334455; cursor: crosshair; }
+  canvas { display: block; width: 100%; height: 100%; }
+  .canvas-hint { font-size: 12px; color: #778899; margin-top: 6px; text-align: center; }
+</style>
+</head>
+<body>
+<h1>Evolving Painting & Bird Chirps</h1>
+<div id="status" class="status">not connected</div>
+
+<button id="start">Start sound</button>
+<button id="auto">Auto Flocks: off</button>
+<button id="clear">Clear Canvas</button>
+<label>My name <input id="name" value="painting_bird"></label>
+
+<div class="panel">
+  <div id="canvas-container">
+    <canvas id="paintCanvas" width="800" height="450"></canvas>
+  </div>
+  <div class="canvas-hint">Click or drag on the canvas to paint flowers & trigger bird tweets. Other instruments in the room paint ripple vines!</div>
+</div>
+
+<label>Bird Pitch (Base Frequency) <input id="birdPitch" type="range" min="1500" max="6000" step="10" value="3200"></label>
+<div class="row">
+  <label>Tweet Rate <input id="tweetRate" type="range" min="1" max="15" step="0.5" value="5"></label>
+  <label>Scatter / Chirpiness <input id="chirpiness" type="range" min="0" max="1" step="0.01" value="0.5"></label>
+</div>
+<div class="row">
+  <label>Painting Fade Rate <input id="fadeRate" type="range" min="0" max="0.05" step="0.001" value="0.003"></label>
+  <label>Listen Ear Sensitivity <input id="earSensitivity" type="range" min="0" max="1" step="0.01" value="0.7"></label>
+</div>
+
+<button id="pulse">Flock Chirp (pulse)</button>
+
+<div id="routing"></div>
+<div id="log"></div>
+
+<script src="osc-browser.min.js"></script>
+<script src="dissonance.js"></script>
+<script>
+/* =====================================================================
+   INSTRUMENT: Evolving Visual Painting & Synthesized Bird Calls
+   - Audio: Dual-oscillator bird tweeting synth with pitch FM/sweeps and fast amp envelopes.
+   - Canvas: Organic evolving painting reactive to clicks, auto-flocks, and incoming audio.
+   - Listen / Audio In: Listens to other room participants, using input energy/spectrum
+     to grow dynamic ripple-vines across the painting.
+   ===================================================================== */
+
+const $ = (id) => document.getElementById(id);
+
+let ctx;
+let masterGain, audioInNode, analyser;
+let autoTimer = null, isAuto = false;
+let audioInConnected = false;
+
+// Initialize Web Audio Graph once
+function initAudio() {
+  if (ctx) return;
+  ctx = audioContext();
+
+  masterGain = ctx.createGain();
+  masterGain.gain.value = 0.7;
+  masterGain.connect(audioOut({ anchor: "auto" }));
+
+  // Audio input for hearing other room instruments
+  audioInNode = audioIn();
+  analyser = ctx.createAnalyser();
+  analyser.fftSize = 256;
+  audioInNode.connect(analyser);
+  audioInConnected = true;
+
+  // Start background canvas animation loop
+  requestAnimationFrame(drawLoop);
+}
+
+// Synthesis function: generate a naturalistic bird tweet
+function triggerTweet(basePitch, scatter, t) {
+  if (!ctx) return;
+  const now = t || ctx.currentTime;
+
+  // Syllable parameters
+  const duration = 0.04 + Math.random() * 0.08;
+  const startFreq = basePitch * (0.8 + Math.random() * 0.4);
+  const endFreq = startFreq * (0.5 + Math.random() * 1.2 * (1 + scatter));
+
+  const osc = ctx.createOscillator();
+  const fmOsc = ctx.createOscillator();
+  const fmGain = ctx.createGain();
+  const amp = ctx.createGain();
+
+  osc.type = "sine";
+  fmOsc.type = "sine";
+
+  // Fast vibrato/trill
+  const fmFreq = 20 + Math.random() * 80 * scatter;
+  fmOsc.frequency.setValueAtTime(fmFreq, now);
+  fmGain.gain.setValueAtTime(startFreq * 0.15 * scatter, now);
+
+  fmOsc.connect(fmGain);
+  fmGain.connect(osc.frequency);
+
+  // Pitch sweep envelope
+  osc.frequency.setValueAtTime(startFreq, now);
+  osc.frequency.exponentialRampToValueAtTime(Math.max(200, endFreq), now + duration);
+
+  // Amplitude envelope
+  amp.gain.setValueAtTime(0, now);
+  amp.gain.linearRampToValueAtTime(0.25, now + duration * 0.2);
+  amp.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+  osc.connect(amp);
+  amp.connect(masterGain);
+
+  fmOsc.start(now);
+  osc.start(now);
+
+  fmOsc.stop(now + duration + 0.01);
+  osc.stop(now + duration + 0.01);
+}
+
+// Canvas & Painting setup
+const canvas = $("paintCanvas");
+const cctx = canvas.getContext("2d");
+let flowers = [];
+let vines = [];
+
+function clearCanvas() {
+  cctx.fillStyle = "#0c1017";
+  cctx.fillRect(0, 0, canvas.width, canvas.height);
+  flowers = [];
+  vines = [];
+}
+clearCanvas();
+
+function addFlower(x, y, hue) {
+  flowers.push({
+    x, y,
+    radius: 2 + Math.random() * 4,
+    maxRadius: 12 + Math.random() * 20,
+    hue: hue !== undefined ? hue : (Math.random() * 360),
+    petals: 5 + Math.floor(Math.random() * 4),
+    alpha: 1
+  });
+}
+
+function addVine(x, y, angle, energy) {
+  vines.push({
+    x, y,
+    angle,
+    speed: 2 + energy * 4,
+    life: 30 + Math.random() * 40,
+    hue: (120 + Math.random() * 80) % 360,
+    width: 1.5 + energy * 3
+  });
+}
+
+// Main Render & Animation Loop
+let lastTime = 0;
+function drawLoop(time) {
+  requestAnimationFrame(drawLoop);
+
+  // Fade canvas slightly over time to keep painting evolving
+  const fade = parseFloat(fadeRateP.value);
+  if (fade > 0) {
+    cctx.fillStyle = `rgba(12, 16, 23, ${fade})`;
+    cctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  // Draw & update growing flowers
+  for (let i = flowers.length - 1; i >= 0; i--) {
+    const f = flowers[i];
+    if (f.radius < f.maxRadius) f.radius += 0.4;
+
+    cctx.save();
+    cctx.translate(f.x, f.y);
+    cctx.fillStyle = `hsla(${f.hue}, 80%, 60%, ${f.alpha})`;
+    cctx.strokeStyle = `hsla(${f.hue + 20}, 90%, 80%, ${f.alpha})`;
+
+    for (let p = 0; p < f.petals; p++) {
+      const ang = (Math.PI * 2 / f.petals) * p;
+      const px = Math.cos(ang) * f.radius;
+      const py = Math.sin(ang) * f.radius;
+      cctx.beginPath();
+      cctx.arc(px, py, f.radius * 0.5, 0, Math.PI * 2);
+      cctx.fill();
+      cctx.stroke();
+    }
+    // Center glow
+    cctx.beginPath();
+    cctx.arc(0, 0, f.radius * 0.3, 0, Math.PI * 2);
+    cctx.fillStyle = "#fff7aa";
+    cctx.fill();
+    cctx.restore();
+  }
+
+  // Process audio input from other participants to draw audio vines
+  if (analyser && audioInConnected) {
+    const freqData = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(freqData);
+
+    let sum = 0;
+    for (let i = 0; i < freqData.length; i++) sum += freqData[i];
+    const avg = sum / freqData.length / 255; // Normalized 0..1
+    const sensitivity = parseFloat(earSensitivityP.value);
+
+    if (avg * sensitivity > 0.08 && Math.random() < 0.3) {
+      const rx = Math.random() * canvas.width;
+      const ry = Math.random() * canvas.height;
+      const angle = Math.random() * Math.PI * 2;
+      addVine(rx, ry, angle, avg * sensitivity);
+    }
+  }
+
+  // Draw dynamic vines
+  for (let i = vines.length - 1; i >= 0; i--) {
+    const v = vines[i];
+    const nextX = v.x + Math.cos(v.angle) * v.speed;
+    const nextY = v.y + Math.sin(v.angle) * v.speed;
+
+    cctx.beginPath();
+    cctx.moveTo(v.x, v.y);
+    cctx.lineTo(nextX, nextY);
+    cctx.strokeStyle = `hsla(${v.hue}, 75%, 55%, 0.8)`;
+    cctx.lineWidth = v.width;
+    cctx.stroke();
+
+    v.x = nextX;
+    v.y = nextY;
+    v.angle += (Math.random() - 0.5) * 0.5;
+    v.life--;
+
+    if (v.life <= 0) vines.splice(i, 1);
+  }
+}
+
+// User Painting Interaction
+let isDrawing = false;
+
+function handlePaintGesture(e) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = (e.clientX - rect.left) * scaleX;
+  const y = (e.clientY - rect.top) * scaleY;
+
+  const normalizedPos = x / canvas.width;
+  
+  if (!ctx) $("start").click();
+
+  // Send sound and visually paint
+  const pitch = 1500 + normalizedPos * 4500;
+  triggerTweet(pitch, parseFloat(chirpinessP.value), ctx.currentTime);
+  addFlower(x, y, normalizedPos * 360);
+
+  // Emit normalized control position
+  birdPitchP.emit(pitch);
+}
+
+canvas.addEventListener("pointerdown", (e) => {
+  isDrawing = true;
+  canvas.setPointerCapture(e.pointerId);
+  handlePaintGesture(e);
+});
+
+canvas.addEventListener("pointermove", (e) => {
+  if (isDrawing && Math.random() < 0.4) {
+    handlePaintGesture(e);
+  }
+});
+
+canvas.addEventListener("pointerup", () => { isDrawing = false; });
+canvas.addEventListener("pointercancel", () => { isDrawing = false; });
+
+// Auto Flocks interval function using Dissonance bgInterval
+function tickAutoFlocks() {
+  if (!ctx) return;
+  const rate = parseFloat(tweetRateP.value);
+  const intervalSec = 1 / rate;
+  
+  // Random chirps
+  if (Math.random() < 0.7) {
+    const p = parseFloat(birdPitchP.value);
+    const c = parseFloat(chirpinessP.value);
+    triggerTweet(p * (0.8 + Math.random() * 0.4), c, ctx.currentTime);
+
+    // Paint auto flowers randomly
+    const rx = Math.random() * canvas.width;
+    const ry = Math.random() * canvas.height;
+    addFlower(rx, ry);
+  }
+}
+
+$("auto").onclick = () => {
+  if (!ctx) $("start").click();
+  isAuto = !isAuto;
+  $("auto").textContent = "Auto Flocks: " + (isAuto ? "on" : "off");
+  $("auto").classList.toggle("active", isAuto);
+
+  if (isAuto) {
+    autoTimer = bgInterval(tickAutoFlocks, 200);
+  } else {
+    clearBg(autoTimer);
+  }
+};
+
+$("clear").onclick = clearCanvas;
+
+$("start").onclick = () => {
+  initAudio();
+  if (ctx && ctx.state === "suspended") {
+    ctx.resume();
+  }
+};
+
+// Dissonance Parameters with maxHz/epsilon rate limiting for network bandwidth moderation
+const birdPitchP = param("birdPitch", {
+  input: "birdPitch",
+  send: "personal",
+  maxHz: 10,
+  epsilon: 10,
+  onChange: (v) => {
+    $("birdPitch").value = v;
+    if (ctx) {
+      triggerTweet(v, parseFloat(chirpinessP.value), ctx.currentTime);
+      addFlower(Math.random() * canvas.width, Math.random() * canvas.height, (v - 1500) / 4500 * 360);
+    }
+  }
+});
+
+const tweetRateP = param("tweetRate", { input: "tweetRate", send: "personal", maxHz: 10, epsilon: 0.1 });
+const chirpinessP = param("chirpiness", { input: "chirpiness", send: "personal", maxHz: 10, epsilon: 0.01 });
+const fadeRateP = param("fadeRate", { input: "fadeRate", send: "personal" });
+const earSensitivityP = param("earSensitivity", { input: "earSensitivity", send: "personal" });
+
+const pulseP = param("pulse", {
+  input: "pulse",
+  kind: "trigger",
+  onChange: () => {
+    if (!ctx) $("start").click();
+    const baseP = parseFloat(birdPitchP.value);
+    const c = parseFloat(chirpinessP.value);
+    for (let i = 0; i < 5; i++) {
+      triggerTweet(baseP * (0.6 + Math.random() * 0.8), c, ctx.currentTime + i * 0.06);
+      addFlower(Math.random() * canvas.width, Math.random() * canvas.height);
+    }
+  }
+});
+</script>
+</body>
+</html>
