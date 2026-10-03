@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dissonance Instrument — Dissonance</title>
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; max-width: 560px; margin: 24px auto; padding: 0 16px; background: #111; color: #eee; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .status { font-size: 13px; color: #999; margin-bottom: 16px; }
+  .status.on { color: #6c6; }
+  label { display: block; margin: 12px 0 2px; }
+  input[type=range] { width: 100%; }
+  button { font: inherit; padding: 8px 14px; margin: 8px 8px 0 0; background: #333; color: #eee; border: 1px solid #555; border-radius: 4px; cursor: pointer; }
+  #log { margin-top: 20px; font: 12px/1.3 ui-monospace, monospace; color: #8a8; height: 120px; overflow: auto; background: #000; padding: 8px; border-radius: 4px; white-space: pre; }
+</style>
+</head>
+<body>
+<div style="margin:0 0 14px"><a href="/" style="color:#9cf;margin-right:14px">Home</a><a href="/gallery.html" style="color:#9cf;margin-right:14px">Instrument gallery</a><a href="/submit.html" style="color:#9cf">Post an instrument</a></div>
+<h1>Dissonance Instrument</h1>
+<div id="status" class="status">not connected</div>
+
+<button id="start">Start sound</button>
+<label>My name <input id="name" value="drone"></label>
+
+<label>density <input id="density" type="range" min="0" max="1" step="0.001" value="0.3"></label>
+<label>brightness <input id="brightness" type="range" min="0" max="1" step="0.001" value="0.5"></label>
+<label>pitch <input id="pitch" type="range" min="55" max="220" step="0.1" value="110"></label>
+<button id="pulse">pulse</button>
+
+<div id="routing"></div>
+<div id="log"></div>
+
+<script src="osc-browser.min.js"></script>
+<script src="dissonance.js"></script>
+<script>
+/* =====================================================================
+   INSTRUMENT (this is the part to prototype with the LLM)
+
+   The network and routing strips come from dissonance.js. Every
+   control is registered with param(); that is what gives it
+   a routing strip next to it. See the top of dissonance.js for the API.
+   ===================================================================== */
+let ctx, osc1, osc2, filter, amp;
+
+document.getElementById("start").onclick = () => {
+  if (ctx) return;
+  ctx = audioContext();
+  filter = ctx.createBiquadFilter(); filter.type = "lowpass";
+  amp = ctx.createGain(); amp.gain.value = 0.15;
+  osc1 = ctx.createOscillator(); osc1.type = "sawtooth";
+  osc2 = ctx.createOscillator(); osc2.type = "sawtooth";
+  osc1.connect(filter); osc2.connect(filter); filter.connect(amp); amp.connect(audioOut());
+  osc1.start(); osc2.start();
+  update();
+};
+
+function update() {
+  if (!ctx) return;
+  const t = ctx.currentTime, f = pitch.value;
+  osc1.frequency.setTargetAtTime(f, t, 0.05);
+  osc2.frequency.setTargetAtTime(f * (1 + density.value * 0.06), t, 0.05);   // density = detune
+  filter.frequency.setTargetAtTime(200 + brightness.value ** 2 * 6000, t, 0.05);
+}
+function hit() {
+  if (!amp) return;
+  const t = ctx.currentTime;
+  amp.gain.cancelScheduledValues(t);
+  amp.gain.setValueAtTime(0.5, t);
+  amp.gain.exponentialRampToValueAtTime(0.15, t + 0.4);
+}
+
+const density    = param("density",    { input: "density",    onChange: update });
+const brightness = param("brightness", { input: "brightness", onChange: update });
+const pitch      = param("pitch",      { input: "pitch",      onChange: update, send: "personal", listen: "" });
+const pulse      = param("pulse",      { input: "pulse", kind: "trigger", onChange: hit });
+</script>
+</body>
+</html>
